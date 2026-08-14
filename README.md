@@ -16,9 +16,35 @@
   <img src="assets/image3.png" alt="DSH Launcher 插件界面" width="32%">
 </p>
 
-## 开发
+## 插件推荐与使用建议
 
-需要 Node.js 22+、Rust 和系统 WebView2：
+以下插件均属于功能与体验增强，不会干扰 DSH 的 loop 工作流，个人推荐按需安装，如果你很需要如playwrite（浏览器控制）等高级功能，我推荐等待或着手开发一个通用MCP插件，而非安装很多个不同的tools插件（除非没有支持的mcp）：
+
+### [DSH Better Sidebar](https://github.com/omdsh-dev/DSH-better-sidebar)
+
+提供更完善的侧边栏与系统终端，让 dsh WebUI 从基础对话界面进一步升级为更专业、更高效的 Agent IDE。
+
+```powershell
+dsh plugin --profile web add dsh-better-sidebar
+```
+
+### [dsh-at-file](https://github.com/omdsh-dev/dsh-at-file)
+
+支持在对话框中快捷添加文件路径，减少手动输入与来回查找，让文件引用更加顺手自然。
+
+```powershell
+dsh plugin --profile web add "github:omdsh-dev/dsh-at-file"
+```
+
+### [dsh-tool-diff](https://github.com/omdsh-dev/dsh-tool-diff)
+
+diff工具是一个值得从 Bash 中“毕业”的文件审查工具，帮助 Agent 更高效地查看与审阅文件变更，在提升审查体验的同时大幅节省 token。
+
+```powershell
+dsh plugin --profile web add github:omdsh-dev/dsh-tool-diff
+```
+
+
 
 ```powershell
 npm install
