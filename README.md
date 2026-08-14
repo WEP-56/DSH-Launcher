@@ -40,11 +40,11 @@ dsh plugin --profile web add "github:omdsh-dev/dsh-at-file"
 
 diff工具是一个值得从 Bash 中“毕业”的文件审查工具，帮助 Agent 更高效地查看与审阅文件变更，在提升审查体验的同时大幅节省 token。
 
+
+## 开发
 ```powershell
 dsh plugin --profile web add github:omdsh-dev/dsh-tool-diff
 ```
-
-
 
 ```powershell
 npm install
@@ -67,9 +67,7 @@ npm run tauri build
 
 配置保存在 Tauri 的应用配置目录中。退出应用时，启动器会终止由它创建的 dsh 进程树。
 
-## 发布
 
-推送形如 `v*` 的 Git tag 后，GitHub Actions 会在 Windows runner 上构建安装包并创建 GitHub Release。发布产物包括 Tauri 配置中启用的 Windows 安装包。
 
 ## 相关链接
 
