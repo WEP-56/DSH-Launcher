@@ -28,7 +28,21 @@ enum LaunchMode {
     Npx,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CloseBehavior {
+    Tray,
+    Exit,
+}
+
+impl Default for CloseBehavior {
+    fn default() -> Self {
+        Self::Tray
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct LauncherConfig {
     launch_mode: LaunchMode,
     executable: String,
@@ -39,6 +53,11 @@ struct LauncherConfig {
     trusted_hosts: Vec<String>,
     auto_start: bool,
     open_on_ready: bool,
+    close_behavior: CloseBehavior,
+    stop_dsh_on_exit: bool,
+    auto_check_updates: bool,
+    window_width: u32,
+    window_height: u32,
 }
 
 impl Default for LauncherConfig {
@@ -57,6 +76,11 @@ impl Default for LauncherConfig {
             trusted_hosts: Vec::new(),
             auto_start: true,
             open_on_ready: true,
+            close_behavior: CloseBehavior::Tray,
+            stop_dsh_on_exit: true,
+            auto_check_updates: true,
+            window_width: 880,
+            window_height: 760,
         }
     }
 }
@@ -87,6 +111,35 @@ struct PackageInfo {
     source: String,
     checked_at: String,
     detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LauncherReleaseAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LauncherRelease {
+    tag_name: String,
+    name: String,
+    html_url: String,
+    published_at: Option<String>,
+    body: Option<String>,
+    assets: Vec<LauncherReleaseAsset>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LauncherUpdateInfo {
+    current_version: String,
+    latest_version: String,
+    tag_name: String,
+    release_url: String,
+    release_name: String,
+    notes: String,
+    installer_name: Option<String>,
+    installer_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -537,9 +590,8 @@ fn run_dsh_invocation(config: &LauncherConfig, args: &[String]) -> Result<Operat
 
 fn npm_command() -> Command {
     #[cfg(windows)]
-    let mut command = Command::new(
-        resolve_windows_executable("npm").unwrap_or_else(|_| "npm.cmd".into()),
-    );
+    let mut command =
+        Command::new(resolve_windows_executable("npm").unwrap_or_else(|_| "npm.cmd".into()));
     #[cfg(not(windows))]
     let mut command = Command::new("npm");
     hide_console(&mut command);
@@ -644,7 +696,13 @@ fn start_process(app: AppHandle, state: AppState) -> Result<LauncherStatus, Stri
     let monitor_state = state.clone();
     let port = config.port;
     thread::spawn(move || {
-        monitor_process(monitor_app, monitor_state, generation, port, startup_timeout)
+        monitor_process(
+            monitor_app,
+            monitor_state,
+            generation,
+            port,
+            startup_timeout,
+        )
     });
     emit_status(&app, &state);
     current_status(state)
@@ -772,6 +830,158 @@ fn epoch_secs() -> u64 {
         .as_secs()
 }
 
+const LAUNCHER_REPOSITORY: &str = "WEP-56/DSH-Launcher";
+
+fn version_key(value: &str) -> Vec<u64> {
+    value
+        .trim()
+        .trim_start_matches(['v', 'V'])
+        .split(['.', '-', '+'])
+        .map(|part| {
+            part.chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<String>()
+        })
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect()
+}
+
+fn latest_launcher_release() -> Result<LauncherRelease, String> {
+    let url = format!("https://api.github.com/repos/{LAUNCHER_REPOSITORY}/releases/latest");
+    let response = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(20))
+        .user_agent(concat!("dsh-launcher/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .get(&url)
+        .set("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|error| format!("无法查询 GitHub Release：{error}"))?;
+    let mut body = String::new();
+    response
+        .into_reader()
+        .take(4 * 1024 * 1024)
+        .read_to_string(&mut body)
+        .map_err(|error| format!("Release 响应读取失败：{error}"))?;
+    serde_json::from_str(&body).map_err(|error| format!("Release 数据无效：{error}"))
+}
+
+fn release_update_info(release: LauncherRelease) -> LauncherUpdateInfo {
+    let installer = release
+        .assets
+        .iter()
+        .filter(|asset| {
+            let name = asset.name.to_ascii_lowercase();
+            name.ends_with(".exe") || name.ends_with(".msi")
+        })
+        .min_by_key(|asset| {
+            let name = asset.name.to_ascii_lowercase();
+            if name.contains("setup") || name.contains("installer") {
+                0
+            } else {
+                1
+            }
+        });
+    LauncherUpdateInfo {
+        current_version: env!("CARGO_PKG_VERSION").into(),
+        latest_version: release.tag_name.trim_start_matches(['v', 'V']).into(),
+        tag_name: release.tag_name,
+        release_url: release.html_url,
+        release_name: release.name,
+        notes: release.body.unwrap_or_default(),
+        installer_name: installer.map(|asset| asset.name.clone()),
+        installer_size: installer.map(|asset| asset.size),
+    }
+}
+
+#[tauri::command]
+async fn check_launcher_update() -> Result<Option<LauncherUpdateInfo>, String> {
+    let release = latest_launcher_release()?;
+    let info = release_update_info(release);
+    if version_key(&info.latest_version) > version_key(&info.current_version) {
+        Ok(Some(info))
+    } else {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+fn get_launcher_version() -> String {
+    env!("CARGO_PKG_VERSION").into()
+}
+
+#[tauri::command]
+async fn install_launcher_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tag_name: String,
+) -> Result<OperationResult, String> {
+    let release = latest_launcher_release()?;
+    if release.tag_name != tag_name {
+        return Err("GitHub Release 已发生变化，请重新检查更新".into());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        return Err("当前平台暂不支持自动安装 Launcher 更新，请打开 Release 页面手动安装".into());
+    }
+    #[cfg(windows)]
+    {
+        let asset = release_update_info(release.clone())
+            .installer_name
+            .and_then(|name| release.assets.into_iter().find(|asset| asset.name == name))
+            .ok_or("该 Release 没有 Windows 安装包")?;
+        if Path::new(&asset.name)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(asset.name.as_str())
+        {
+            return Err("安装包文件名无效".into());
+        }
+        if !asset
+            .browser_download_url
+            .starts_with("https://github.com/")
+        {
+            return Err("安装包下载地址不受信任".into());
+        }
+        let target = std::env::temp_dir().join(&asset.name);
+        let response = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(180))
+            .user_agent(concat!("dsh-launcher/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .get(&asset.browser_download_url)
+            .call()
+            .map_err(|error| format!("下载安装包失败：{error}"))?;
+        let mut file =
+            fs::File::create(&target).map_err(|error| format!("无法写入安装包：{error}"))?;
+        let mut reader = response.into_reader().take(250 * 1024 * 1024);
+        std::io::copy(&mut reader, &mut file)
+            .map_err(|error| format!("安装包下载不完整：{error}"))?;
+        // 安装程序可能替换当前目录中的可执行文件；下载成功后再结束 dsh，
+        // 这样网络失败不会破坏用户当前的服务状态。
+        let _ = stop_process(&app, state.inner());
+        let mut installer = if target
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("msi"))
+        {
+            let mut command = Command::new("msiexec.exe");
+            command.args(["/i", target.to_string_lossy().as_ref(), "/passive"]);
+            command
+        } else {
+            Command::new(&target)
+        };
+        hide_console(&mut installer);
+        installer
+            .spawn()
+            .map_err(|error| format!("无法启动安装程序：{error}"))?;
+        app.exit(0);
+        Ok(OperationResult {
+            success: true,
+            output: format!("已启动 {}", asset.name),
+        })
+    }
+}
+
 fn kill_child_tree(mut child: Child) {
     let pid = child.id();
     #[cfg(windows)]
@@ -779,10 +989,22 @@ fn kill_child_tree(mut child: Child) {
         let mut taskkill = Command::new("taskkill");
         hide_console(&mut taskkill);
         let _ = taskkill
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .args(["/PID", &pid.to_string(), "/T"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+        // Give dsh and any descendants a short chance to tear down their own
+        // windows before using the forceful fallback.
+        thread::sleep(Duration::from_millis(180));
+        if child.try_wait().ok().flatten().is_none() {
+            let mut force_kill = Command::new("taskkill");
+            hide_console(&mut force_kill);
+            let _ = force_kill
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
     #[cfg(unix)]
     {
@@ -838,6 +1060,19 @@ fn save_config(app: AppHandle, config: LauncherConfig) -> Result<LauncherConfig,
 }
 
 #[tauri::command]
+fn save_window_size(app: AppHandle, width: u32, height: u32) -> Result<(), String> {
+    // Keep persisted dimensions within the same practical limits as the window
+    // definition, and avoid writing transient zero-sized resize events.
+    if !(620..=4096).contains(&width) || !(560..=4096).contains(&height) {
+        return Ok(());
+    }
+    let mut config = read_config(&app)?;
+    config.window_width = width;
+    config.window_height = height;
+    save_config_file(&app, &config)
+}
+
+#[tauri::command]
 fn get_status(state: State<'_, AppState>) -> Result<LauncherStatus, String> {
     current_status(state.inner().clone())
 }
@@ -876,10 +1111,7 @@ async fn stop_dsh(app: AppHandle, state: State<'_, AppState>) -> Result<Launcher
 }
 
 #[tauri::command]
-async fn restart_dsh(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<LauncherStatus, String> {
+async fn restart_dsh(app: AppHandle, state: State<'_, AppState>) -> Result<LauncherStatus, String> {
     stop_process(&app, state.inner())?;
     start_with_feedback(&app, state.inner())
 }
@@ -1046,10 +1278,7 @@ async fn get_package_info(app: AppHandle) -> Result<PackageInfo, String> {
 }
 
 #[tauri::command]
-async fn update_dsh(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<OperationResult, String> {
+async fn update_dsh(app: AppHandle, state: State<'_, AppState>) -> Result<OperationResult, String> {
     let config = read_config(&app)?;
     let was_ready = state
         .runtime
@@ -1306,7 +1535,10 @@ fn open_external(url: String) -> Result<(), String> {
     {
         let mut command = Command::new("explorer.exe");
         hide_console(&mut command);
-        command.arg(&url).spawn().map_err(|error| error.to_string())?;
+        command
+            .arg(&url)
+            .spawn()
+            .map_err(|error| error.to_string())?;
     }
     #[cfg(target_os = "macos")]
     {
@@ -1453,9 +1685,16 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             });
         }
         "quit" => {
-            let state = app.state::<AppState>();
-            let _ = stop_process(app, state.inner());
-            app.exit(0);
+            let config = read_config(app).unwrap_or_default();
+            if config.stop_dsh_on_exit {
+                let state = app.state::<AppState>();
+                let _ = stop_process(app, state.inner());
+            }
+            let app = app.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(120));
+                app.exit(0);
+            });
         }
         _ => {}
     })
@@ -1472,6 +1711,7 @@ pub fn run() {
             load_config,
             default_config,
             save_config,
+            save_window_size,
             get_status,
             start_dsh,
             stop_dsh,
@@ -1483,6 +1723,9 @@ pub fn run() {
             open_dsh_config,
             get_package_info,
             update_dsh,
+            check_launcher_update,
+            install_launcher_update,
+            get_launcher_version,
             list_plugins,
             search_plugins,
             fetch_market,
@@ -1502,8 +1745,24 @@ pub fn run() {
                 // 只有主窗口关闭时驻留托盘；新建的窗口正常销毁，
                 // 否则每次“关闭”都只是隐藏，越积越多。
                 if window.label() == "control" {
-                    api.prevent_close();
-                    let _ = window.hide();
+                    let config = read_config(&window.app_handle()).unwrap_or_default();
+                    if matches!(config.close_behavior, CloseBehavior::Tray) {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    } else {
+                        if config.stop_dsh_on_exit {
+                            let state = window.app_handle().state::<AppState>();
+                            let _ = stop_process(&window.app_handle(), state.inner());
+                        }
+                        // Let WebView2 finish its native window teardown before ending
+                        // the tray-backed event loop. Immediate app.exit() can race
+                        // Chromium's window-class cleanup (error 1412 on Windows).
+                        let app = window.app_handle().clone();
+                        thread::spawn(move || {
+                            thread::sleep(Duration::from_millis(120));
+                            app.exit(0);
+                        });
+                    }
                 }
             }
         })

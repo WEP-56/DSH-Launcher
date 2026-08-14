@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
+import whaleIconUrl from "../assets/dsh-icon-source.png";
 import {
   CircleAlert,
   CircleCheck,
@@ -22,6 +23,7 @@ import {
   RotateCcw,
   Save,
   Search,
+  Settings,
   SlidersHorizontal,
   Square,
   TerminalSquare,
@@ -34,7 +36,7 @@ import "./styles.css";
 
 type LaunchMode = "command" | "npx";
 type Phase = "stopped" | "starting" | "ready" | "stopping" | "failed";
-type DialogId = "manage-dialog" | "config-dialog" | "plugin-dialog";
+type DialogId = "manage-dialog" | "config-dialog" | "plugin-dialog" | "settings-dialog" | "update-dialog";
 
 interface LauncherConfig {
   launch_mode: LaunchMode;
@@ -46,6 +48,11 @@ interface LauncherConfig {
   trusted_hosts: string[];
   auto_start: boolean;
   open_on_ready: boolean;
+  close_behavior: "tray" | "exit";
+  stop_dsh_on_exit: boolean;
+  auto_check_updates: boolean;
+  window_width: number;
+  window_height: number;
 }
 
 interface LauncherStatus {
@@ -75,6 +82,7 @@ interface ConfigFileInfo {
 interface InstalledPlugin { name: string; version: string; bundle: boolean; }
 interface PluginSearchResult { name: string; version: string; description: string; homepage: string; npm_url: string; keywords: string[]; }
 interface OperationResult { success: boolean; output: string; }
+interface LauncherUpdateInfo { current_version: string; latest_version: string; tag_name: string; release_url: string; release_name: string; notes: string; installer_name?: string; installer_size?: number; }
 interface MarketMeta { id: string; label: string; color?: string | null; }
 interface MarketPlugin {
   name: string; full_name: string; spec: string; description: string; url: string; homepage: string;
@@ -91,6 +99,7 @@ app.innerHTML = `
         <button class="tool-button" data-dialog="manage-dialog" title="管理"><i data-lucide="package-check"></i><span>管理</span></button>
         <button class="tool-button" data-dialog="config-dialog" title="配置"><i data-lucide="sliders-horizontal"></i><span>配置</span></button>
         <button class="tool-button" data-dialog="plugin-dialog" title="插件"><i data-lucide="puzzle"></i><span>插件</span></button>
+        <button class="tool-button" data-dialog="settings-dialog" title="设置"><i data-lucide="settings"></i><span>设置</span></button>
         <button id="new-window" class="tool-button" title="新建 Launcher 窗口"><i data-lucide="plus"></i><span>新建</span></button>
       </nav>
       <div class="title-drag" data-tauri-drag-region></div>
@@ -104,11 +113,10 @@ app.innerHTML = `
 
     <main class="workspace-view">
       <iframe id="dsh-frame" title="DeepSeek Harness WebUI" allow="clipboard-read; clipboard-write" hidden></iframe>
-      <div id="workspace-state" class="workspace-state">
-        <div class="workspace-state-icon"><i data-lucide="terminal-square"></i></div>
+      <div id="workspace-state" class="workspace-state" data-phase="stopped">
+        <button id="workspace-start" class="whale-button" type="button" aria-label="启动 dsh" title="启动 dsh"><span class="whale-wave whale-wave-one"></span><span class="whale-wave whale-wave-two"></span><img src="${whaleIconUrl}" alt="DeepSeek" draggable="false"></button>
         <h2 id="workspace-title">正在准备 dsh</h2>
         <p id="workspace-message">启动器会在服务就绪后载入 WebUI。</p>
-        <button id="workspace-start" class="button primary"><i data-lucide="rotate-ccw"></i><span>启动服务</span></button>
       </div>
     </main>
 
@@ -175,11 +183,32 @@ app.innerHTML = `
         <pre id="plugin-output" class="operation-output" hidden></pre>
       </section>
     </div>
+    <div id="settings-dialog" class="modal" hidden>
+      <div class="modal-backdrop" data-close-modal></div>
+      <section class="modal-panel settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <header class="modal-header"><div><p class="eyebrow">DSH LAUNCHER</p><h2 id="settings-title">设置</h2></div><button class="modal-close" data-close-modal title="关闭"><i data-lucide="x"></i></button></header>
+        <div class="settings-content">
+          <div class="settings-section"><p class="eyebrow">WINDOW</p><h3>关闭按钮行为</h3><div class="segmented wide"><label><input type="radio" name="close_behavior" value="tray"><span>最小化到托盘</span></label><label><input type="radio" name="close_behavior" value="exit"><span>退出 Launcher</span></label></div></div>
+          <label class="check-row"><input id="setting-auto-start" type="checkbox"><span><strong>启动后自动启动 dsh Web 服务</strong><small>Launcher 打开后立即启动本地服务</small></span></label>
+          <label class="check-row"><input id="setting-stop-dsh" type="checkbox"><span><strong>退出 Launcher 时结束 dsh</strong><small>只结束由当前 Launcher 启动并登记的进程树</small></span></label>
+          <div class="settings-section about-section"><p class="eyebrow">ABOUT</p><h3>关于 DSH Launcher</h3><p class="about-copy">当前版本 <strong id="launcher-version">读取中</strong></p><div class="about-actions"><a class="button quiet" data-external href="https://github.com/WEP-56/DSH-Launcher"><i data-lucide="github"></i><span>GitHub 仓库</span></a><button id="check-launcher-update" class="button quiet"><i data-lucide="refresh-cw"></i><span>检查更新</span></button></div><label class="check-row compact"><input id="setting-auto-update" type="checkbox"><span>自动检查 Launcher 更新</span></label></div>
+        </div>
+        <footer class="modal-footer"><span id="settings-save-result"></span><button id="save-settings" class="button primary"><i data-lucide="save"></i><span>保存设置</span></button></footer>
+      </section>
+    </div>
+    <div id="update-dialog" class="modal" hidden>
+      <div class="modal-backdrop"></div>
+      <section class="modal-panel update-panel" role="dialog" aria-modal="true" aria-labelledby="update-title">
+        <header class="modal-header"><div><p class="eyebrow">DSH LAUNCHER</p><h2 id="update-title">发现新版本</h2></div><button id="update-close" class="modal-close" title="稍后处理"><i data-lucide="x"></i></button></header>
+        <div class="update-content"><div class="update-version"><strong id="update-latest"></strong><span>当前版本 <b id="update-current"></b></span></div><p id="update-notes" class="update-notes"></p><p id="update-progress" class="update-progress"></p></div>
+        <footer class="modal-footer"><button id="update-later" class="button quiet">稍后提醒</button><button id="update-confirm" class="button primary"><i data-lucide="download"></i><span>下载并安装</span></button></footer>
+      </section>
+    </div>
     <div id="toast" class="toast" role="status" hidden></div>
   </div>
 `;
 
-createIcons({ icons: { CircleAlert, CircleCheck, Code2, Download, ExternalLink, Eye, FileCog, FileText, FolderOpen, Github, LoaderCircle, Minus, PackageCheck, Plus, Puzzle, RefreshCw, RotateCcw, Save, Search, SlidersHorizontal, Square, TerminalSquare, Trash2, Wrench, X } });
+createIcons({ icons: { CircleAlert, CircleCheck, Code2, Download, ExternalLink, Eye, FileCog, FileText, FolderOpen, Github, LoaderCircle, Minus, PackageCheck, Plus, Puzzle, RefreshCw, RotateCcw, Save, Search, Settings, SlidersHorizontal, Square, TerminalSquare, Trash2, Wrench, X } });
 const $ = <T extends HTMLElement = HTMLInputElement>(selector: string): T => document.querySelector<T>(selector)!;
 const currentWindow = getCurrentWindow();
 let config: LauncherConfig;
@@ -192,6 +221,10 @@ let marketCategories = new Map<string, MarketMeta>();
 let marketTypes = new Map<string, MarketMeta>();
 let marketShown = 0;
 let marketSearchTimer: number | undefined;
+let pendingUpdate: LauncherUpdateInfo | null = null;
+let updateBusy = false;
+let launcherVersion = "读取中";
+let resizeSaveTimer: number | undefined;
 const MARKET_PAGE = 120;
 const marketFilter: { query: string; type: string; category: string; sort: "recent" | "stars" } = { query: "", type: "plugin", category: "all", sort: "recent" };
 
@@ -209,8 +242,12 @@ function showDialog(id: DialogId): void {
   if (id === "manage-dialog") void refreshPackageInfo();
   if (id === "config-dialog") void loadConfigFiles();
   if (id === "plugin-dialog") void loadInstalledPlugins();
+  if (id === "settings-dialog") fillSettings();
 }
-function closeDialogs(): void { document.querySelectorAll<HTMLElement>(".modal").forEach((modal) => { modal.hidden = true; }); }
+function closeDialogs(): void {
+  if (updateBusy) return;
+  document.querySelectorAll<HTMLElement>(".modal").forEach((modal) => { modal.hidden = true; });
+}
 
 function fillForm(value: LauncherConfig): void {
   $<HTMLInputElement>(`input[name="launch_mode"][value="${value.launch_mode}"]`).checked = true;
@@ -220,6 +257,38 @@ function fillForm(value: LauncherConfig): void {
   $("#dsh-home").value = value.dsh_home;
   $("#port").value = String(value.port);
   updateModeFields();
+}
+function fillSettings(): void {
+  $<HTMLInputElement>(`input[name="close_behavior"][value="${config.close_behavior}"]`).checked = true;
+  $("#setting-auto-start").checked = config.auto_start;
+  $("#setting-stop-dsh").checked = config.stop_dsh_on_exit;
+  $("#setting-auto-update").checked = config.auto_check_updates;
+  $("#launcher-version").textContent = launcherVersion;
+  if (currentWindow.label === "control") $("#window-close").title = config.close_behavior === "tray" ? "关闭到托盘" : "退出 Launcher";
+}
+function readSettings(): LauncherConfig {
+  return { ...config,
+    close_behavior: ($<HTMLInputElement>("input[name=close_behavior]:checked")).value as "tray" | "exit",
+    auto_start: $("#setting-auto-start").checked,
+    stop_dsh_on_exit: $("#setting-stop-dsh").checked,
+    auto_check_updates: $("#setting-auto-update").checked,
+  };
+}
+async function saveSettings(): Promise<void> {
+  try {
+    config = await invoke<LauncherConfig>("save_config", { config: readSettings() });
+    fillForm(config);
+    $("#settings-save-result").textContent = "已保存";
+    toast("设置已保存");
+  } catch (error) { toast(String(error), true); }
+}
+function persistWindowSize(width: number, height: number): void {
+  window.clearTimeout(resizeSaveTimer);
+  resizeSaveTimer = window.setTimeout(() => {
+    config.window_width = Math.round(width);
+    config.window_height = Math.round(height);
+    void invoke("save_window_size", { width: Math.round(width), height: Math.round(height) });
+  }, 350);
 }
 function readForm(): LauncherConfig {
   const mode = ($<HTMLInputElement>("input[name=launch_mode]:checked")).value as LaunchMode;
@@ -239,9 +308,14 @@ function renderStatus(next: LauncherStatus): void {
   const state = $("#workspace-state");
   frame.hidden = next.phase !== "ready";
   state.hidden = next.phase === "ready";
+  state.dataset.phase = next.phase;
   $("#workspace-title").textContent = next.phase === "failed" ? "dsh 启动失败" : next.phase === "starting" ? "正在启动 dsh" : "dsh 尚未运行";
   $("#workspace-message").textContent = next.message;
-  $("#workspace-start").toggleAttribute("disabled", next.phase === "starting" || next.phase === "stopping");
+  const startButton = $<HTMLButtonElement>("#workspace-start");
+  startButton.toggleAttribute("disabled", next.phase === "starting" || next.phase === "stopping");
+  const actionLabel = next.phase === "failed" ? "重启 dsh" : next.phase === "starting" ? "正在连接 dsh" : "启动 dsh";
+  startButton.title = actionLabel;
+  startButton.ariaLabel = actionLabel;
   $("#manage-restart").toggleAttribute("disabled", next.phase === "starting" || next.phase === "stopping");
   $("#manage-stop").toggleAttribute("disabled", next.phase === "stopped" || next.phase === "stopping");
   // 只在进入 ready 或地址变化时装载 iframe。iframe.src 的 getter 会把地址
@@ -270,6 +344,41 @@ async function refreshPackageInfo(): Promise<void> {
     $("#latest-version").textContent = info.latest_version;
     $("#package-source").textContent = info.source;
   } catch (error) { $("#package-source").textContent = "检查失败"; toast(String(error), true); }
+}
+function showUpdateDialog(info: LauncherUpdateInfo): void {
+  pendingUpdate = info;
+  $("#update-latest").textContent = `${info.release_name || "DSH Launcher"} · ${info.latest_version}`;
+  $("#update-current").textContent = info.current_version;
+  $("#update-notes").textContent = info.notes || "此版本包含稳定性和兼容性改进。";
+  $("#update-progress").textContent = info.installer_name ? `安装包：${info.installer_name}` : "该 Release 未提供 Windows 安装包";
+  $("#update-confirm").toggleAttribute("disabled", !info.installer_name);
+  $("#update-dialog").hidden = false;
+}
+async function checkLauncherUpdate(silent = false): Promise<void> {
+  const button = $<HTMLButtonElement>("#check-launcher-update");
+  button.disabled = true;
+  try {
+    const info = await invoke<LauncherUpdateInfo | null>("check_launcher_update");
+    if (info) showUpdateDialog(info);
+    else if (!silent) toast("已是最新版本");
+  } catch (error) {
+    if (!silent) toast(String(error), true);
+  } finally { button.disabled = false; }
+}
+async function installLauncherUpdate(): Promise<void> {
+  if (!pendingUpdate?.installer_name || updateBusy) return;
+  updateBusy = true;
+  const modal = $("#update-dialog");
+  modal.querySelectorAll<HTMLButtonElement>("button").forEach((button) => { button.disabled = true; });
+  $("#update-progress").textContent = "正在下载安装包，请勿关闭窗口…";
+  try {
+    await invoke<OperationResult>("install_launcher_update", { tagName: pendingUpdate.tag_name });
+  } catch (error) {
+    updateBusy = false;
+    modal.querySelectorAll<HTMLButtonElement>("button").forEach((button) => { button.disabled = false; });
+    $("#update-progress").textContent = String(error);
+    toast(String(error), true);
+  }
 }
 async function saveStartupConfig(): Promise<void> {
   try {
@@ -489,6 +598,11 @@ $("#config-file-select").addEventListener("change", renderConfigFile);
 $("#save-config-file").addEventListener("click", () => void saveConfigFile());
 $("#open-config-file").addEventListener("click", () => void invoke("open_dsh_config", { id: $("#config-file-select").value }));
 $("#manage-save").addEventListener("click", () => void saveStartupConfig());
+$("#save-settings").addEventListener("click", () => void saveSettings());
+$("#check-launcher-update").addEventListener("click", () => void checkLauncherUpdate(false));
+$("#update-confirm").addEventListener("click", () => void installLauncherUpdate());
+$("#update-later").addEventListener("click", closeDialogs);
+$("#update-close").addEventListener("click", closeDialogs);
 $("#check-package").addEventListener("click", () => void refreshPackageInfo());
 $("#update-package").addEventListener("click", async () => {
   const output = $("#manage-output");
@@ -552,10 +666,23 @@ document.addEventListener("keydown", (event) => { if (event.key === "Escape") cl
 
 async function init(): Promise<void> {
   await listen<LauncherStatus>("launcher-status", (event) => renderStatus(event.payload));
-  const [loadedConfig, loadedStatus] = await Promise.all([invoke<LauncherConfig>("load_config"), invoke<LauncherStatus>("get_status")]);
+  const [loadedConfig, loadedStatus, version] = await Promise.all([invoke<LauncherConfig>("load_config"), invoke<LauncherStatus>("get_status"), invoke<string>("get_launcher_version")]);
   config = loadedConfig;
+  launcherVersion = version;
+  if (currentWindow.label === "control") {
+    const width = Math.max(620, Math.min(4096, config.window_width || 880));
+    const height = Math.max(560, Math.min(4096, config.window_height || 760));
+    await currentWindow.setSize(new LogicalSize(width, height));
+    await currentWindow.onResized(async ({ payload }) => {
+      if (await currentWindow.isMaximized() || await currentWindow.isFullscreen()) return;
+      const logical = payload.toLogical(await currentWindow.scaleFactor());
+      persistWindowSize(logical.width, logical.height);
+    });
+  }
   fillForm(config);
+  fillSettings();
   renderStatus(loadedStatus);
   if (config.auto_start && loadedStatus.phase === "stopped") await runAction("start_dsh");
+  if (config.auto_check_updates) void checkLauncherUpdate(true);
 }
 void init().catch((error) => toast(String(error), true));

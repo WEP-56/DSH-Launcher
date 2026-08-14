@@ -41,16 +41,28 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 #dsh-frame[hidden] { display: none; }
 .workspace-state { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 28px; background: var(--surface-muted); text-align: center; }
 .workspace-state[hidden] { display: none; }
-.workspace-state-icon { width: 44px; height: 44px; display: grid; place-items: center; margin-bottom: 16px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--accent); }
-.workspace-state-icon svg { width: 20px; height: 20px; }
+.whale-button { position: relative; width: 178px; height: 178px; display: grid; place-items: center; margin-bottom: 20px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--accent); isolation: isolate; }
+.whale-button::before { content: ""; position: absolute; inset: 12px; z-index: 0; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border)); border-radius: 50%; background: var(--surface); box-shadow: 0 12px 34px rgba(18, 35, 62, .13); }
+.whale-button img { position: relative; z-index: 2; width: 156px; height: 156px; border-radius: 26%; object-fit: cover; filter: drop-shadow(0 9px 14px rgba(18, 26, 39, .2)); transition: transform .2s ease, filter .2s ease; }
+.whale-button:hover img { transform: translateY(-3px) scale(1.025); filter: drop-shadow(0 12px 18px rgba(18, 26, 39, .27)); }
+.whale-button:active img { transform: translateY(1px) scale(.985); }
+.whale-button:disabled { cursor: wait; opacity: 1; }
+.whale-button:disabled img { transform: none; }
+.whale-wave { position: absolute; inset: 3px; z-index: 1; border: 1px solid color-mix(in srgb, var(--accent) 48%, transparent); border-radius: 50%; opacity: 0; pointer-events: none; }
+.workspace-state[data-phase="starting"] .whale-wave { animation: whale-wave 2.1s ease-out infinite; }
+.workspace-state[data-phase="starting"] .whale-wave-two { animation-delay: 1.05s; }
 .workspace-state h2 { margin: 0; font-size: 17px; line-height: 24px; font-weight: 650; }
-.workspace-state p { max-width: 540px; margin: 8px 0 18px; color: var(--text-muted); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.workspace-state p { max-width: 540px; margin: 8px 0 0; color: var(--text-muted); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.workspace-state[data-phase="failed"] .whale-button::before { border-color: color-mix(in srgb, var(--danger) 48%, var(--border)); }
+.workspace-state[data-phase="failed"] .whale-button img { filter: grayscale(.35) drop-shadow(0 9px 14px rgba(120, 33, 44, .2)); }
 
 .modal[hidden] { display: none; }
 .modal { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; }
 .modal-backdrop { position: absolute; inset: 0; background: rgba(16, 18, 22, .38); }
 .modal-panel { position: relative; z-index: 1; width: min(680px, calc(100% - 34px)); max-height: calc(100% - 32px); overflow: auto; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); box-shadow: 0 18px 55px rgba(22, 28, 38, .22); }
 .manage-panel { width: min(650px, calc(100% - 34px)); }
+.settings-panel { width: min(560px, calc(100% - 34px)); }
+.update-panel { width: min(500px, calc(100% - 34px)); }
 .config-panel { width: min(850px, calc(100% - 34px)); height: min(650px, calc(100% - 32px)); display: flex; flex-direction: column; }
 .plugin-panel { width: min(960px, calc(100% - 34px)); height: min(720px, calc(100% - 32px)); display: flex; flex-direction: column; }
 .modal-header { min-height: 58px; display: flex; align-items: center; justify-content: space-between; padding: 13px 18px; border-bottom: 1px solid var(--border); }
@@ -102,6 +114,26 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 .config-editor { flex: 1; min-height: 240px; margin: 0 18px; padding: 13px; resize: none; border: 1px solid var(--border); border-radius: 5px; background: #191b1f; color: #d9dde3; font: 12px/1.6 "Cascadia Mono", Consolas, monospace; tab-size: 2; }
 .modal-footer { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding: 14px 18px; }
 .modal-footer span { flex: 1; color: var(--text-muted); font-size: 11px; overflow-wrap: anywhere; }
+.settings-content { padding: 18px; }
+.settings-section { padding-bottom: 17px; border-bottom: 1px solid var(--border); }
+.settings-section h3 { margin: 3px 0 10px; font-size: 13px; font-weight: 650; }
+.segmented.wide { display: grid; width: 100%; grid-template-columns: 1fr 1fr; }
+.check-row { display: flex; align-items: flex-start; gap: 9px; padding: 14px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+.check-row input { width: 15px; height: 15px; margin: 1px 0 0; accent-color: var(--accent); }
+.check-row strong { display: block; font-size: 12px; font-weight: 650; }
+.check-row small { display: block; margin-top: 4px; color: var(--text-muted); font-size: 10.5px; line-height: 15px; }
+.check-row.compact { border-bottom: 0; padding-bottom: 0; }
+.about-section { padding-top: 17px; border-bottom: 0; }
+.about-copy { margin: 6px 0 12px; color: var(--text-muted); font-size: 11px; }
+.about-copy strong { color: var(--text); }
+.about-actions { display: flex; gap: 7px; }
+.update-content { padding: 20px 18px 6px; }
+.update-version { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.update-version strong { color: var(--accent); font-size: 17px; }
+.update-version span { color: var(--text-muted); font-size: 11px; }
+.update-version b { color: var(--text); font-weight: 650; }
+.update-notes { max-height: 180px; margin: 15px 0 8px; overflow: auto; color: var(--text-muted); font-size: 11px; line-height: 17px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.update-progress { min-height: 18px; margin: 8px 0; color: var(--text-muted); font: 10px/15px "Cascadia Mono", Consolas, monospace; overflow-wrap: anywhere; }
 
 .plugin-install { display: flex; gap: 8px; padding: 14px 18px 6px; }
 .input-with-icon { position: relative; flex: 1; min-width: 0; }
@@ -156,6 +188,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 .toast[data-error="true"] { border-color: #efcbd0; background: #fae9eb; color: var(--danger); }
 .toast[hidden] { display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes whale-wave { 0% { transform: scale(.84); opacity: 0; } 22% { opacity: .65; } 100% { transform: scale(1.32); opacity: 0; } }
 
 @media (max-width: 700px) {
   body { min-width: 360px; }
