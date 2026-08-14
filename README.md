@@ -40,12 +40,10 @@ dsh plugin --profile web add "github:omdsh-dev/dsh-at-file"
 
 diff工具是一个值得从 Bash 中“毕业”的文件审查工具，帮助 Agent 更高效地查看与审阅文件变更，在提升审查体验的同时大幅节省 token。
 
-
-## 开发
 ```powershell
 dsh plugin --profile web add github:omdsh-dev/dsh-tool-diff
 ```
-
+## 开发
 ```powershell
 npm install
 npm run tauri dev
