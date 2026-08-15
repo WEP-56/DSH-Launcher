@@ -68,6 +68,14 @@ dsh plugin --profile web add github:omdsh-dev/dsh-tool-diff
 dsh plugin --profile web add git+https://github.com/omdsh-dev/dsh-genui.git
 ```
 
+### [dsh-mcp-manager](https://github.com/hyqhyq3/dsh-mcp-manager)
+
+普适性的mcp适配器，让mcp接入代替那些直接添加Tools的插件吧（除非没有对应的mcp），为了你的token、维护难度考虑
+
+```
+npx -p @deepseek-ai/dsh dsh plugin --profile web add github:hyqhyq3/dsh-mcp-manager
+```
+
 
 ## 开发
 ```powershell
