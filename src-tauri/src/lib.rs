@@ -417,6 +417,19 @@ fn hide_console(command: &mut Command) {
 #[cfg(not(windows))]
 fn hide_console(_command: &mut Command) {}
 
+#[cfg(windows)]
+fn detach_process(command: &mut Command) {
+    // The installer must outlive this GUI process.  A new process group keeps
+    // Windows from treating it as part of the launcher's shutdown tree.
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+}
+
+#[cfg(not(windows))]
+fn detach_process(_command: &mut Command) {}
+
 #[cfg(target_os = "macos")]
 fn adopt_login_shell_path() {
     // macOS 的 GUI 进程从 launchd 继承极简 PATH（不含 Homebrew/nvm 等目录），
@@ -1038,7 +1051,18 @@ async fn install_launcher_update(
         {
             return Err("安装包下载地址不受信任".into());
         }
-        let target = std::env::temp_dir().join(&asset.name);
+        // Do not reuse a previous download: an old installer can still be
+        // locked by Windows after a failed update attempt.  Keep the asset
+        // extension so Windows selects the correct installer handler.
+        let target = std::env::temp_dir().join(format!(
+            "dsh-launcher-update-{}-{}-{}",
+            epoch_secs(),
+            std::process::id(),
+            asset.name
+        ));
+        if asset.size > 250 * 1024 * 1024 {
+            return Err("安装包超过 250 MB，已拒绝下载".into());
+        }
         let response = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(180))
             .user_agent(concat!("dsh-launcher/", env!("CARGO_PKG_VERSION")))
@@ -1049,10 +1073,23 @@ async fn install_launcher_update(
         let mut file =
             fs::File::create(&target).map_err(|error| format!("无法写入安装包：{error}"))?;
         let mut reader = response.into_reader().take(250 * 1024 * 1024);
-        std::io::copy(&mut reader, &mut file)
+        let downloaded = std::io::copy(&mut reader, &mut file)
             .map_err(|error| format!("安装包下载不完整：{error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("安装包写入未完成：{error}"))?;
+        if downloaded == 0 || (asset.size > 0 && downloaded != asset.size) {
+            let _ = fs::remove_file(&target);
+            return Err(format!(
+                "安装包下载不完整（收到 {downloaded} 字节，预期 {} 字节）",
+                asset.size
+            ));
+        }
         // 安装程序可能替换当前目录中的可执行文件；下载成功后再结束 dsh，
         // 这样网络失败不会破坏用户当前的服务状态。
+        let was_ready = {
+            let runtime = state.runtime.lock().map_err(|_| "启动器状态锁已损坏")?;
+            runtime.phase == Phase::Ready && !runtime.external
+        };
         let _ = stop_process(&app, state.inner());
         let mut installer = if target
             .extension()
@@ -1065,14 +1102,30 @@ async fn install_launcher_update(
         } else {
             Command::new(&target)
         };
-        hide_console(&mut installer);
         installer
-            .spawn()
-            .map_err(|error| format!("无法启动安装程序：{error}"))?;
-        app.exit(0);
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        detach_process(&mut installer);
+        if let Err(error) = installer.spawn() {
+            // Do not leave a previously managed dsh service stopped when the
+            // downloaded installer cannot be started.
+            if was_ready {
+                let _ = start_with_feedback(&app, state.inner());
+            }
+            return Err(format!("无法启动安装程序：{error}"));
+        }
+        // Let the child process initialize before tearing down WebView2 and
+        // the Tauri event loop.  Calling app.exit immediately can terminate a
+        // just-created installer on Windows before its first window appears.
+        let app_to_exit = app.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(500));
+            app_to_exit.exit(0);
+        });
         Ok(OperationResult {
             success: true,
-            output: format!("已启动 {}", asset.name),
+            output: format!("已启动安装程序 {}", asset.name),
         })
     }
 }
@@ -1244,6 +1297,11 @@ fn dsh_home_for(config: &LauncherConfig) -> PathBuf {
 fn config_file_path(config: &LauncherConfig, id: &str) -> Option<(String, String, PathBuf)> {
     let home = dsh_home_for(config);
     let (name, relative) = match id {
+        "credentials" => (
+            "全局凭据 · .credentials.yaml",
+            PathBuf::from(".credentials.yaml"),
+        ),
+        "settings" => ("全局设置 · settings.yaml", PathBuf::from("settings.yaml")),
         "home-patch" => (
             "全局补丁 · cordis.patch.yml",
             PathBuf::from("cordis.patch.yml"),
@@ -1270,7 +1328,14 @@ fn config_file_path(config: &LauncherConfig, id: &str) -> Option<(String, String
 fn list_config_files(app: AppHandle) -> Result<Vec<ConfigFileInfo>, String> {
     let config = read_config(&app)?;
     let mut files = Vec::new();
-    for id in ["home-patch", "web-manifest", "web-patch", "web-workspace"] {
+    for id in [
+        "credentials",
+        "settings",
+        "home-patch",
+        "web-manifest",
+        "web-patch",
+        "web-workspace",
+    ] {
         if let Some((id, name, path)) = config_file_path(&config, id) {
             let content = if path.exists() {
                 fs::read_to_string(&path)
