@@ -60,7 +60,16 @@ interface LauncherStatus {
   message: string;
   url: string;
   pid: number | null;
+  external: boolean;
   logs: string[];
+}
+
+interface TabState {
+  id: number;
+  title: string;
+  frame: HTMLIFrameElement | null;
+  loadedUrl: string;
+  stale: boolean;
 }
 
 interface PackageInfo {
@@ -100,9 +109,12 @@ app.innerHTML = `
         <button class="tool-button" data-dialog="config-dialog" title="配置"><i data-lucide="sliders-horizontal"></i><span>配置</span></button>
         <button class="tool-button" data-dialog="plugin-dialog" title="插件"><i data-lucide="puzzle"></i><span>插件</span></button>
         <button class="tool-button" data-dialog="settings-dialog" title="设置"><i data-lucide="settings"></i><span>设置</span></button>
-        <button id="new-window" class="tool-button" title="新建 Launcher 窗口"><i data-lucide="plus"></i><span>新建</span></button>
+        <button id="new-window" class="tool-button" title="新建窗口"><i data-lucide="plus"></i><span>新建</span></button>
       </nav>
-      <div class="title-drag" data-tauri-drag-region></div>
+      <div id="tab-zone" class="tab-zone" data-tauri-drag-region>
+        <div id="tab-strip" class="tab-strip" role="tablist" aria-label="dsh 标签页"></div>
+        <button id="tab-add" class="tab-add" title="新建标签页（Ctrl+T）"><i data-lucide="plus"></i></button>
+      </div>
       <nav class="window-controls" aria-label="窗口控制">
         <button id="refresh-web" title="刷新 dsh WebUI"><i data-lucide="refresh-cw"></i></button>
         <button id="window-minimize" title="最小化"><i data-lucide="minus"></i></button>
@@ -111,8 +123,7 @@ app.innerHTML = `
       </nav>
     </header>
 
-    <main class="workspace-view">
-      <iframe id="dsh-frame" title="DeepSeek Harness WebUI" allow="clipboard-read; clipboard-write" hidden></iframe>
+    <main id="workspace-view" class="workspace-view">
       <div id="workspace-state" class="workspace-state" data-phase="stopped">
         <button id="workspace-start" class="whale-button" type="button" aria-label="启动 dsh" title="启动 dsh"><span class="whale-wave whale-wave-one"></span><span class="whale-wave whale-wave-two"></span><img src="${whaleIconUrl}" alt="DeepSeek" draggable="false"></button>
         <h2 id="workspace-title">正在准备 dsh</h2>
@@ -212,10 +223,13 @@ createIcons({ icons: { CircleAlert, CircleCheck, Code2, Download, ExternalLink, 
 const $ = <T extends HTMLElement = HTMLInputElement>(selector: string): T => document.querySelector<T>(selector)!;
 const currentWindow = getCurrentWindow();
 let config: LauncherConfig;
-let status: LauncherStatus = { phase: "stopped", message: "dsh 尚未启动", url: "http://127.0.0.1:3080", pid: null, logs: [] };
+let status: LauncherStatus = { phase: "stopped", message: "dsh 尚未启动", url: "http://127.0.0.1:3080", pid: null, external: false, logs: [] };
 let configFiles: ConfigFileInfo[] = [];
 let toastTimer: number | undefined;
-let frameUrl = "";
+let tabs: TabState[] = [];
+let activeTab = 0;
+let tabSequence = 0;
+let tabNameSequence = 0;
 let market: MarketCatalog | null = null;
 let marketCategories = new Map<string, MarketMeta>();
 let marketTypes = new Map<string, MarketMeta>();
@@ -300,14 +314,228 @@ function updateModeFields(): void {
   $("#npx-field").hidden = !npx;
 }
 
+// —— 标签页体系：每个标签一个 WebUI iframe，切换时保留状态 ——
+const TAB_CLOSE_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>`;
+const TAB_TEAR_DISTANCE = 36;
+
+interface TabDrag { id: number; pointerId: number; startX: number; startY: number; started: boolean; torn: boolean; ghost: HTMLElement | null; }
+let tabDrag: TabDrag | null = null;
+
+function tabElement(id: number): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`.tab[data-tab-id="${id}"]`);
+}
+
+function renderTabs(): void {
+  const strip = $("#tab-strip");
+  strip.innerHTML = tabs.map((tab) => {
+    const flags = `${tab.id === activeTab ? " active" : ""}${tabDrag?.started && tabDrag.id === tab.id ? " dragging" : ""}${tabDrag?.torn && tabDrag.id === tab.id ? " tearing" : ""}`;
+    return `<div class="tab${flags}" data-tab-id="${tab.id}" role="tab" aria-selected="${tab.id === activeTab}" title="${escapeAttr(tab.title)}"><span class="tab-title">${escapeHtml(tab.title)}</span><button class="tab-close" title="关闭标签页" tabindex="-1">${TAB_CLOSE_SVG}</button></div>`;
+  }).join("");
+  strip.querySelectorAll<HTMLElement>(".tab").forEach((element) => {
+    const id = Number(element.dataset.tabId);
+    element.addEventListener("pointerdown", (event) => onTabPointerDown(event, id));
+    element.addEventListener("auxclick", (event) => { if (event.button === 1) { event.preventDefault(); removeTab(id); } });
+    element.addEventListener("dblclick", (event) => {
+      if ((event.target as HTMLElement).closest(".tab-close")) return;
+      const tab = tabs.find((item) => item.id === id);
+      const titleElement = element.querySelector<HTMLElement>(".tab-title");
+      if (tab && titleElement) startTabRename(tab, titleElement);
+    });
+    const close = element.querySelector<HTMLButtonElement>(".tab-close");
+    close?.addEventListener("pointerdown", (event) => event.stopPropagation());
+    close?.addEventListener("click", (event) => { event.stopPropagation(); removeTab(id); });
+  });
+  updateTabDensity();
+}
+
+function updateTabDensity(): void {
+  // 三档收缩（阈值对应 styles.css 里 .tab 的各档 min-width）：标签再多也
+  // 先压扁而不是溢出，压到极限才交给标签条横向滚动。
+  const available = Math.max(0, $("#tab-zone").clientWidth - 46);
+  const strip = $("#tab-strip");
+  strip.classList.toggle("crowded", tabs.length * 88 > available);
+  strip.classList.toggle("dense", tabs.length * 48 > available);
+}
+
+function syncFrames(): void {
+  const ready = status.phase === "ready";
+  $("#workspace-state").hidden = ready;
+  for (const tab of tabs) {
+    if (ready && tab.id === activeTab) {
+      if (!tab.frame) {
+        const frame = document.createElement("iframe");
+        frame.className = "dsh-frame";
+        frame.title = "DeepSeek Harness WebUI";
+        frame.setAttribute("allow", "clipboard-read; clipboard-write");
+        $("#workspace-view").appendChild(frame);
+        tab.frame = frame;
+      }
+      // 只在地址变化或被标记过期时装载。iframe.src 的 getter 会把地址规范化
+      // （补上尾部斜杠），与 status.url 直接比较永远不相等，因此自己记录
+      // loadedUrl，避免每条状态事件（包括日志推送）都触发一次 WebUI 重载。
+      if (tab.loadedUrl !== status.url || tab.stale) {
+        tab.frame.src = status.url;
+        tab.loadedUrl = status.url;
+        tab.stale = false;
+      }
+      tab.frame.hidden = false;
+    } else if (tab.frame) {
+      tab.frame.hidden = true;
+    }
+  }
+}
+
+function addTab(title?: string): void {
+  const id = ++tabSequence;
+  tabs.push({ id, title: title?.trim() || `DSH ${++tabNameSequence}`, frame: null, loadedUrl: "", stale: false });
+  activateTab(id);
+}
+
+function activateTab(id: number): void {
+  if (!tabs.some((tab) => tab.id === id)) return;
+  // 已激活时跳过重绘：双击重命名依赖两次点击落在同一个元素上。
+  if (activeTab !== id) { activeTab = id; renderTabs(); }
+  tabElement(id)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  syncFrames();
+}
+
+function removeTab(id: number): void {
+  const index = tabs.findIndex((tab) => tab.id === id);
+  if (index < 0) return;
+  const [removed] = tabs.splice(index, 1);
+  removed.frame?.remove();
+  if (!tabs.length) {
+    // 最后一个标签：主窗口自动补一个新标签，新建的窗口直接关闭。
+    if (currentWindow.label === "control") addTab();
+    else void currentWindow.close();
+    return;
+  }
+  if (activeTab === id) activeTab = tabs[Math.min(index, tabs.length - 1)].id;
+  renderTabs();
+  syncFrames();
+}
+
+function cycleTab(direction: number): void {
+  if (tabs.length < 2) return;
+  const index = tabs.findIndex((tab) => tab.id === activeTab);
+  activateTab(tabs[(index + direction + tabs.length) % tabs.length].id);
+}
+
+function startTabRename(tab: TabState, titleElement: HTMLElement): void {
+  const input = document.createElement("input");
+  input.className = "tab-rename";
+  input.value = tab.title;
+  titleElement.replaceWith(input);
+  input.focus();
+  input.select();
+  const commit = (): void => {
+    const value = input.value.trim();
+    if (value) tab.title = value;
+    renderTabs();
+  };
+  input.addEventListener("blur", commit);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") input.blur();
+    if (event.key === "Escape") { input.value = tab.title; input.blur(); }
+    event.stopPropagation();
+  });
+  input.addEventListener("pointerdown", (event) => event.stopPropagation());
+}
+
+function onTabPointerDown(event: PointerEvent, id: number): void {
+  if (event.button !== 0 || (event.target as HTMLElement).closest(".tab-close, .tab-rename")) return;
+  activateTab(id);
+  tabDrag = { id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, started: false, torn: false, ghost: null };
+}
+
+function setTabTorn(torn: boolean, x: number, y: number): void {
+  if (!tabDrag) return;
+  if (tabDrag.torn !== torn) {
+    tabDrag.torn = torn;
+    tabElement(tabDrag.id)?.classList.toggle("tearing", torn);
+    if (torn && !tabDrag.ghost) {
+      const tab = tabs.find((item) => item.id === tabDrag!.id);
+      const ghost = document.createElement("div");
+      ghost.className = "tab-ghost";
+      ghost.innerHTML = `<strong>${escapeHtml(tab?.title ?? "")}</strong><small>${tabs.length > 1 ? "松开新建窗口 · 拖到其他窗口顶栏可合并" : "拖到其他窗口顶栏可合并"}</small>`;
+      document.body.append(ghost);
+      tabDrag.ghost = ghost;
+    } else if (!torn) {
+      tabDrag.ghost?.remove();
+      tabDrag.ghost = null;
+    }
+  }
+  if (torn && tabDrag.ghost) tabDrag.ghost.style.transform = `translate(${x + 14}px, ${y + 10}px)`;
+}
+
+function reorderDraggedTab(x: number): void {
+  if (!tabDrag) return;
+  const dragId = tabDrag.id;
+  const dragged = tabs.find((tab) => tab.id === dragId);
+  if (!dragged) return;
+  const others = tabs.filter((tab) => tab.id !== dragId);
+  let insert = others.length;
+  for (let index = 0; index < others.length; index += 1) {
+    const rect = tabElement(others[index].id)?.getBoundingClientRect();
+    if (rect && x < rect.left + rect.width / 2) { insert = index; break; }
+  }
+  const next = [...others.slice(0, insert), dragged, ...others.slice(insert)];
+  if (next.some((tab, index) => tab !== tabs[index])) { tabs = next; renderTabs(); }
+}
+
+function finishTabDrag(event: PointerEvent, cancelled: boolean): void {
+  if (!tabDrag || event.pointerId !== tabDrag.pointerId) return;
+  const drag = tabDrag;
+  tabDrag = null;
+  // 纯点击（没拖起来）不重绘标签条：双击重命名依赖两次点击落在同一个元素上。
+  if (!drag.started) return;
+  drag.ghost?.remove();
+  document.body.classList.remove("tab-dragging");
+  const tab = tabs.find((item) => item.id === drag.id);
+  if (!tab || cancelled || !drag.torn) { renderTabs(); return; }
+  // 松手在窗口顶栏带之外：交给后端按光标位置决定“并入其他窗口”还是“拖出成新窗口”。
+  void (async () => {
+    try {
+      const outcome = await invoke<string>("drop_tab", { title: tab.title, remaining: tabs.length });
+      if (outcome === "adopted" || outcome === "detached") removeTab(tab.id);
+      else renderTabs();
+    } catch (error) {
+      toast(String(error), true);
+      renderTabs();
+    }
+  })();
+}
+
+window.addEventListener("pointermove", (event) => {
+  if (!tabDrag || event.pointerId !== tabDrag.pointerId) return;
+  if (!tabDrag.started) {
+    if (Math.hypot(event.clientX - tabDrag.startX, event.clientY - tabDrag.startY) < 5) return;
+    tabDrag.started = true;
+    // 拖动真正开始才接管指针：捕获挂在不会被重建的容器上（标签条重排时会
+    // 整体重绘），并且不影响未拖动时 click/dblclick 的正常派发。
+    try { $("#tab-zone").setPointerCapture(event.pointerId); } catch { /* 不支持时退化为窗口内拖拽 */ }
+    document.body.classList.add("tab-dragging");
+    tabElement(tabDrag.id)?.classList.add("dragging");
+  }
+  const zone = $("#tab-zone").getBoundingClientRect();
+  const inBand = event.clientY >= zone.top - TAB_TEAR_DISTANCE && event.clientY <= zone.bottom + TAB_TEAR_DISTANCE
+    && event.clientX >= -12 && event.clientX <= window.innerWidth + 12;
+  if (inBand) {
+    setTabTorn(false, event.clientX, event.clientY);
+    reorderDraggedTab(event.clientX);
+  } else {
+    setTabTorn(true, event.clientX, event.clientY);
+  }
+});
+window.addEventListener("pointerup", (event) => finishTabDrag(event, false));
+window.addEventListener("pointercancel", (event) => finishTabDrag(event, true));
+
 function renderStatus(next: LauncherStatus): void {
   const wasReady = status.phase === "ready";
   status = next;
-  $("#service-state").textContent = next.phase === "ready" ? "运行中" : next.phase === "starting" ? "启动中" : next.phase === "failed" ? "启动失败" : "已停止";
-  const frame = $("#dsh-frame") as HTMLIFrameElement;
+  const externalReady = next.phase === "ready" && next.external;
+  $("#service-state").textContent = next.phase === "ready" ? (next.external ? "运行中（外部）" : "运行中") : next.phase === "starting" ? "启动中" : next.phase === "failed" ? "启动失败" : "已停止";
   const state = $("#workspace-state");
-  frame.hidden = next.phase !== "ready";
-  state.hidden = next.phase === "ready";
   state.dataset.phase = next.phase;
   $("#workspace-title").textContent = next.phase === "failed" ? "dsh 启动失败" : next.phase === "starting" ? "正在启动 dsh" : "dsh 尚未运行";
   $("#workspace-message").textContent = next.message;
@@ -316,21 +544,23 @@ function renderStatus(next: LauncherStatus): void {
   const actionLabel = next.phase === "failed" ? "重启 dsh" : next.phase === "starting" ? "正在连接 dsh" : "启动 dsh";
   startButton.title = actionLabel;
   startButton.ariaLabel = actionLabel;
-  $("#manage-restart").toggleAttribute("disabled", next.phase === "starting" || next.phase === "stopping");
-  $("#manage-stop").toggleAttribute("disabled", next.phase === "stopped" || next.phase === "stopping");
-  // 只在进入 ready 或地址变化时装载 iframe。iframe.src 的 getter 会把地址
-  // 规范化（补上尾部斜杠），直接与 next.url 比较永远不相等，每条状态事件
-  // （包括日志推送）都会触发一次 WebUI 重载。
-  if (next.phase === "ready" && (!wasReady || frameUrl !== next.url)) {
-    frameUrl = next.url;
-    frame.src = next.url;
-  }
+  // 外部启动的服务不归 Launcher 管：停止/重启在这里没有意义，禁用并说明。
+  const restartButton = $<HTMLButtonElement>("#manage-restart");
+  const stopButton = $<HTMLButtonElement>("#manage-stop");
+  restartButton.toggleAttribute("disabled", next.phase === "starting" || next.phase === "stopping" || externalReady);
+  stopButton.toggleAttribute("disabled", next.phase === "stopped" || next.phase === "stopping" || externalReady);
+  restartButton.title = externalReady ? "服务由外部启动，Launcher 无法重启" : "重启服务";
+  stopButton.title = externalReady ? "服务由外部启动，Launcher 无法停止" : "停止服务";
+  // 进入就绪的瞬间把所有标签标记为待重载：服务可能重启过或换了端口，旧
+  // iframe 内容已失效；后台标签等到被激活时再各自重载。
+  if (next.phase === "ready" && !wasReady) tabs.forEach((tab) => { tab.stale = true; });
+  syncFrames();
 }
 function refreshWeb(): void {
-  const frame = $("#dsh-frame") as HTMLIFrameElement;
-  if (status.phase !== "ready" || !frameUrl) { toast("dsh Web 服务尚未就绪", true); return; }
+  const tab = tabs.find((item) => item.id === activeTab);
+  if (status.phase !== "ready" || !tab?.frame || !tab.loadedUrl) { toast("dsh Web 服务尚未就绪", true); return; }
   // 跨域 iframe 访问 contentWindow.location 会抛 SecurityError，重新赋值 src 触发刷新。
-  frame.src = frameUrl;
+  tab.frame.src = tab.loadedUrl;
 }
 
 async function runAction(command: "start_dsh" | "stop_dsh" | "restart_dsh"): Promise<void> {
@@ -429,7 +659,7 @@ async function installPlugin(spec = $("#plugin-spec").value.trim()): Promise<voi
   try {
     const result = await invoke<OperationResult>("install_plugin", { spec });
     output.textContent = result.output || (result.success ? "安装完成" : "安装失败");
-    toast(result.success ? "插件安装完成，服务已重新启动" : "插件安装失败", !result.success);
+    toast(result.success ? (status.external ? "插件安装完成（当前沿用外部服务，需自行重启该服务生效）" : "插件安装完成，服务已重新启动") : "插件安装失败", !result.success);
     if (result.success) { $("#plugin-spec").value = ""; await loadInstalledPlugins(); }
   } catch (error) { output.textContent = String(error); toast(String(error), true); }
 }
@@ -438,7 +668,7 @@ async function removePlugin(spec: string): Promise<void> {
   try {
     const result = await invoke<OperationResult>("remove_plugin", { spec });
     output.textContent = result.output || (result.success ? "卸载完成" : "卸载失败");
-    toast(result.success ? "插件已卸载，服务已重新启动" : "插件卸载失败", !result.success);
+    toast(result.success ? (status.external ? "插件已卸载（当前沿用外部服务，需自行重启该服务生效）" : "插件已卸载，服务已重新启动") : "插件卸载失败", !result.success);
     if (result.success) await loadInstalledPlugins();
   } catch (error) { output.textContent = String(error); toast(String(error), true); }
 }
@@ -656,17 +886,49 @@ document.addEventListener("click", (event) => {
 });
 $("#browse-workspace").addEventListener("click", async () => { const selected = await open({ directory: true, multiple: false, defaultPath: $("#working-directory").value || undefined }); if (typeof selected === "string") $("#working-directory").value = selected; });
 $("#refresh-web").addEventListener("click", refreshWeb);
+$("#tab-add").addEventListener("click", () => addTab());
+// 标签多到放不下时用滚轮横向滚动标签条。
+$("#tab-strip").addEventListener("wheel", (event) => {
+  const strip = $("#tab-strip");
+  if (strip.scrollWidth > strip.clientWidth) { event.preventDefault(); strip.scrollLeft += event.deltaY; }
+}, { passive: false });
+// 中键按下默认会进入自动滚动模式，抢在标签的中键关闭之前按掉。
+$("#tab-strip").addEventListener("mousedown", (event) => { if (event.button === 1) event.preventDefault(); });
+window.addEventListener("resize", updateTabDensity);
 $("#new-window").addEventListener("click", () => void invoke("new_launcher_window").catch((error) => toast(String(error), true)));
 $("#window-minimize").addEventListener("click", () => void currentWindow.minimize());
 $("#window-maximize").addEventListener("click", () => void currentWindow.toggleMaximize());
 $("#window-close").addEventListener("click", () => void currentWindow.close());
 // 只有主窗口关闭时驻留托盘，新建窗口是真正关闭。
 if (currentWindow.label !== "control") $("#window-close").title = "关闭窗口";
-document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeDialogs(); });
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { closeDialogs(); return; }
+  if (!event.ctrlKey || event.altKey || event.metaKey) return;
+  const key = event.key.toLowerCase();
+  if (key === "t" && !event.shiftKey) { event.preventDefault(); addTab(); }
+  else if (key === "w" && !event.shiftKey) { event.preventDefault(); removeTab(activeTab); }
+  else if (key === "tab") { event.preventDefault(); cycleTab(event.shiftKey ? -1 : 1); }
+});
+
+async function revealWindow(): Promise<void> {
+  // 窗口以隐藏状态创建（tauri.conf.json / spawn_launcher_window），首帧内容
+  // 就绪后才显示，避免 WebView 初始化期间的白屏；失败时由后端兜底定时器接管。
+  try {
+    await currentWindow.show();
+    await currentWindow.setFocus();
+  } catch { /* 后端兜底 */ }
+}
 
 async function init(): Promise<void> {
   await listen<LauncherStatus>("launcher-status", (event) => renderStatus(event.payload));
-  const [loadedConfig, loadedStatus, version] = await Promise.all([invoke<LauncherConfig>("load_config"), invoke<LauncherStatus>("get_status"), invoke<string>("get_launcher_version")]);
+  // 其他窗口把标签拖到本窗口顶栏时，由后端路由过来收编。
+  await listen<{ title: string }>("adopt-tab", (event) => addTab(event.payload.title));
+  const [loadedConfig, loadedStatus, version, initialTab] = await Promise.all([
+    invoke<LauncherConfig>("load_config"),
+    invoke<LauncherStatus>("get_status"),
+    invoke<string>("get_launcher_version"),
+    invoke<string | null>("take_initial_tab"),
+  ]);
   config = loadedConfig;
   launcherVersion = version;
   if (currentWindow.label === "control") {
@@ -679,10 +941,13 @@ async function init(): Promise<void> {
       persistWindowSize(logical.width, logical.height);
     });
   }
+  // 拖出标签生成的窗口带着原标签的标题，普通窗口用默认名。
+  addTab(initialTab ?? undefined);
   fillForm(config);
   fillSettings();
   renderStatus(loadedStatus);
+  await revealWindow();
   if (config.auto_start && loadedStatus.phase === "stopped") await runAction("start_dsh");
   if (config.auto_check_updates) void checkLauncherUpdate(true);
 }
-void init().catch((error) => toast(String(error), true));
+void init().catch((error) => { void revealWindow(); toast(String(error), true); });

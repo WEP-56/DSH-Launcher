@@ -27,19 +27,49 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 
 .shell { width: 100%; height: 100%; overflow: hidden; }
 .titlebar { height: 35px; display: flex; align-items: center; padding-left: 3px; border-bottom: 1px solid var(--border); background: var(--surface); user-select: none; }
-.toolbar-left, .window-controls { height: 100%; display: flex; align-items: stretch; }
+.toolbar-left, .window-controls { height: 100%; display: flex; align-items: stretch; flex: none; }
 .tool-button, .window-controls button { width: 38px; height: 100%; display: grid; place-items: center; position: relative; border: 0; border-radius: 0; background: transparent; color: var(--text-muted); }
 .tool-button:hover, .window-controls button:hover { background: var(--surface-hover); color: var(--text); }
 .tool-button svg, .window-controls svg { width: 15px; height: 15px; stroke-width: 1.8; }
 .tool-button span { display: none; }
-.title-drag { flex: 1; height: 100%; }
 .window-controls button { width: 44px; }
 .window-controls button.close:hover { background: #d3313d; color: #fff; }
 
+/* —— 标签条：居中放在顶栏，空白处仍是窗口拖拽区 —— */
+.tab-zone { flex: 1 1 0; min-width: 0; height: 100%; display: flex; align-items: center; justify-content: center; gap: 3px; padding: 0 8px; overflow: hidden; }
+.tab-strip { display: flex; align-items: center; gap: 3px; min-width: 0; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.tab-strip::-webkit-scrollbar { display: none; }
+.tab { flex: 0 1 168px; min-width: 88px; display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 5px 0 10px; border: 1px solid transparent; border-radius: 6px; color: var(--text-muted); font-size: 11.5px; user-select: none; cursor: default; }
+.tab:hover { background: color-mix(in srgb, var(--surface-hover) 62%, transparent); }
+.tab.active { background: var(--surface-hover); border-color: var(--border); color: var(--text); }
+.tab-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab .tab-rename { height: 20px; flex: 1 1 auto; min-width: 40px; width: 100%; padding: 0 4px; border-radius: 4px; font-size: 11px; }
+.tab-close { flex: none; width: 18px; height: 18px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: inherit; opacity: 0; }
+.tab:hover .tab-close, .tab.active .tab-close { opacity: .72; }
+.tab-close:hover { background: color-mix(in srgb, var(--text-muted) 24%, transparent); opacity: 1; }
+.tab-close svg { width: 11px; height: 11px; }
+/* 标签一多就逐级收缩（阈值与 main.ts 的 updateTabDensity 保持一致）：先压
+   宽度、藏起非活动标签的关闭钮，再压成小条；实在放不下时标签条横向滚动
+   （滚轮），活动标签自动滚入视野。 */
+.tab-strip.crowded .tab { min-width: 48px; padding: 0 4px 0 8px; }
+.tab-strip.crowded .tab:not(.active):not(:hover) .tab-close { display: none; }
+.tab-strip.dense .tab { min-width: 26px; padding: 0 5px; }
+.tab-strip.dense .tab:not(.active) .tab-close { display: none; }
+.tab-strip.dense .tab-title { text-overflow: clip; }
+.tab.dragging { opacity: .9; }
+.tab.tearing { opacity: .3; }
+.tab-add { flex: none; width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); }
+.tab-add:hover { background: var(--surface-hover); color: var(--text); }
+.tab-add svg { width: 14px; height: 14px; stroke-width: 2; }
+.tab-ghost { position: fixed; left: 0; top: 0; z-index: 100; pointer-events: none; display: flex; flex-direction: column; gap: 2px; max-width: 240px; padding: 7px 11px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--surface); box-shadow: 0 12px 30px rgba(15, 19, 26, .3); }
+.tab-ghost strong { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab-ghost small { color: var(--text-muted); font-size: 9.5px; }
+body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; }
+
 .workspace-view { position: relative; width: 100%; height: calc(100% - 35px); background: #fff; }
-#dsh-frame { width: 100%; height: 100%; border: 0; background: #fff; }
-#dsh-frame[hidden] { display: none; }
-.workspace-state { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 28px; background: var(--surface-muted); text-align: center; }
+.dsh-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+.dsh-frame[hidden] { display: none; }
+.workspace-state { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 28px; background: var(--surface-muted); text-align: center; }
 .workspace-state[hidden] { display: none; }
 .whale-button { position: relative; width: 178px; height: 178px; display: grid; place-items: center; margin-bottom: 20px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--accent); isolation: isolate; }
 .whale-button::before { content: ""; position: absolute; inset: 12px; z-index: 0; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border)); border-radius: 50%; background: var(--surface); box-shadow: 0 12px 34px rgba(18, 35, 62, .13); }

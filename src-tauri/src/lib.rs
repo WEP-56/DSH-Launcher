@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs,
     io::{BufRead, BufReader, Read},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
@@ -101,6 +101,7 @@ struct LauncherStatus {
     message: String,
     url: String,
     pid: Option<u32>,
+    external: bool,
     logs: Vec<String>,
 }
 
@@ -254,6 +255,8 @@ struct RuntimeState {
     url: String,
     child: Option<Child>,
     pid: Option<u32>,
+    // 端口上的服务由用户在 Launcher 之外启动：只沿用不接管，停止/退出都不碰它。
+    external: bool,
     logs: VecDeque<String>,
     generation: u64,
 }
@@ -266,6 +269,7 @@ impl Default for RuntimeState {
             url: "http://127.0.0.1:3080".into(),
             child: None,
             pid: None,
+            external: false,
             logs: VecDeque::new(),
             generation: 0,
         }
@@ -276,6 +280,8 @@ impl Default for RuntimeState {
 struct AppState {
     runtime: Arc<Mutex<RuntimeState>>,
     market: Arc<Mutex<Option<MarketCatalog>>>,
+    // 拖出标签新建窗口时，按窗口 label 暂存它要带走的标签标题。
+    pending_tabs: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Default for AppState {
@@ -283,6 +289,7 @@ impl Default for AppState {
         Self {
             runtime: Arc::new(Mutex::new(RuntimeState::default())),
             market: Arc::new(Mutex::new(None)),
+            pending_tabs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -293,6 +300,7 @@ fn snapshot(runtime: &RuntimeState) -> LauncherStatus {
         message: runtime.message.clone(),
         url: runtime.url.clone(),
         pid: runtime.pid,
+        external: runtime.external,
         logs: runtime.logs.iter().cloned().collect(),
     }
 }
@@ -612,6 +620,79 @@ fn wait_for_port_free(port: u16) -> bool {
     false
 }
 
+fn http_service_alive(port: u16) -> bool {
+    // 端口有监听者时，用一次真实的 HTTP 往返确认对面是活着的 Web 服务，
+    // 而不是残留的半死进程或非 HTTP 程序；任何状态码都算有响应。
+    let url = format!("http://127.0.0.1:{port}/");
+    match ureq::AgentBuilder::new()
+        .timeout(Duration::from_millis(1500))
+        .build()
+        .get(&url)
+        .call()
+    {
+        Ok(_) | Err(ureq::Error::Status(..)) => true,
+        Err(ureq::Error::Transport(_)) => false,
+    }
+}
+
+fn attach_external(
+    app: AppHandle,
+    state: AppState,
+    generation: u64,
+    port: u16,
+) -> Result<LauncherStatus, String> {
+    {
+        let mut runtime = state.runtime.lock().map_err(|_| "启动器状态锁已损坏")?;
+        if runtime.generation != generation {
+            drop(runtime);
+            return current_status(state);
+        }
+        runtime.phase = Phase::Ready;
+        runtime.external = true;
+        runtime.pid = None;
+        runtime.message = format!("已连接到端口 {port} 上已在运行的 dsh 服务（外部启动，Launcher 不会停止它）");
+        runtime
+            .logs
+            .push_back("[launcher] 检测到端口已有 Web 服务在运行，直接沿用外部 dsh".into());
+    }
+    emit_status(&app, &state);
+    let monitor_state = state.clone();
+    thread::spawn(move || monitor_external(app, monitor_state, generation, port));
+    current_status(state)
+}
+
+fn monitor_external(app: AppHandle, state: AppState, generation: u64, port: u16) {
+    // 外部服务不归 Launcher 管，但它退出后要把界面从“运行中”翻回可启动状态，
+    // 不能让用户对着一个连不上的 iframe。连续三次探测失败才算真的没了。
+    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let mut failures = 0;
+    loop {
+        thread::sleep(Duration::from_millis(900));
+        match state.runtime.lock() {
+            Ok(runtime) if runtime.generation == generation => {}
+            _ => return,
+        }
+        if TcpStream::connect_timeout(&address, Duration::from_millis(400)).is_ok() {
+            failures = 0;
+            continue;
+        }
+        failures += 1;
+        if failures < 3 {
+            continue;
+        }
+        if let Ok(mut runtime) = state.runtime.lock() {
+            if runtime.generation != generation {
+                return;
+            }
+            runtime.phase = Phase::Stopped;
+            runtime.external = false;
+            runtime.message = "外部 dsh 服务已停止，可以在这里重新启动".into();
+        }
+        emit_status(&app, &state);
+        return;
+    }
+}
+
 fn start_process(app: AppHandle, state: AppState) -> Result<LauncherStatus, String> {
     let config = read_config(&app)?;
     validate_config(&config)?;
@@ -627,19 +708,33 @@ fn start_process(app: AppHandle, state: AppState) -> Result<LauncherStatus, Stri
         runtime.generation += 1;
         generation = runtime.generation;
         runtime.phase = Phase::Starting;
+        runtime.external = false;
         runtime.message = "正在启动 dsh web…".into();
         runtime.url = format!("http://127.0.0.1:{}", config.port);
         runtime.logs.clear();
     }
     emit_status(&app, &state);
 
-    // 端口被占用时 dsh 会启动失败，而就绪探测却能连上别人的服务并误报 Ready，
-    // 因此先验证端口可用，把问题变成一条明确的错误。
-    if !wait_for_port_free(config.port) {
-        return Err(format!(
-            "端口 {} 已被占用：可能是上次残留的 dsh 进程或其他程序。请结束占用进程，或在“管理”里换一个端口。",
-            config.port
-        ));
+    // 端口被占用不再直接报错：先探测占用者是否是可用的 Web 服务（多半是用户
+    // 提前手动启动的 dsh web）。是就直接沿用——不登记子进程、不接管、退出时
+    // 也不结束它；不是（比如刚结束的进程还没释放端口）才照旧等待释放。
+    let port_free = match TcpListener::bind((Ipv4Addr::LOCALHOST, config.port)) {
+        Ok(listener) => {
+            drop(listener);
+            true
+        }
+        Err(_) => false,
+    };
+    if !port_free {
+        if http_service_alive(config.port) {
+            return attach_external(app, state, generation, config.port);
+        }
+        if !wait_for_port_free(config.port) {
+            return Err(format!(
+                "端口 {} 已被占用，且占用者不像一个可用的 Web 服务。请结束占用进程，或在“管理”里换一个端口。",
+                config.port
+            ));
+        }
     }
 
     let mut command = command_for_config(&config)?;
@@ -1017,21 +1112,35 @@ fn kill_child_tree(mut child: Child) {
 }
 
 fn stop_process(app: &AppHandle, state: &AppState) -> Result<LauncherStatus, String> {
-    let child = {
+    let (child, status) = {
         let mut runtime = state.runtime.lock().map_err(|_| "启动器状态锁已损坏")?;
         runtime.generation += 1;
         runtime.pid = None;
-        let child = runtime.child.take();
-        let Some(child) = child else {
-            runtime.phase = Phase::Stopped;
-            runtime.message = "dsh 尚未启动".into();
-            return Ok(snapshot(&runtime));
-        };
-        runtime.phase = Phase::Stopping;
-        runtime.message = "正在停止 dsh…".into();
-        child
+        match runtime.child.take() {
+            Some(child) => {
+                runtime.phase = Phase::Stopping;
+                runtime.message = "正在停止 dsh…".into();
+                (Some(child), snapshot(&runtime))
+            }
+            None => {
+                // 没有登记过子进程：要么本来就没启动，要么沿用的是外部服务。
+                // 外部服务只“断开”，绝不结束一个不是我们启动的进程。
+                let was_external = runtime.external;
+                runtime.external = false;
+                runtime.phase = Phase::Stopped;
+                runtime.message = if was_external {
+                    "已断开与外部 dsh 服务的连接（该服务仍在运行）".into()
+                } else {
+                    "dsh 尚未启动".into()
+                };
+                (None, snapshot(&runtime))
+            }
+        }
     };
     emit_status(app, state);
+    let Some(child) = child else {
+        return Ok(status);
+    };
 
     kill_child_tree(child);
     let mut runtime = state.runtime.lock().map_err(|_| "启动器状态锁已损坏")?;
@@ -1280,12 +1389,11 @@ async fn get_package_info(app: AppHandle) -> Result<PackageInfo, String> {
 #[tauri::command]
 async fn update_dsh(app: AppHandle, state: State<'_, AppState>) -> Result<OperationResult, String> {
     let config = read_config(&app)?;
-    let was_ready = state
-        .runtime
-        .lock()
-        .map_err(|_| "启动器状态锁已损坏")?
-        .phase
-        == Phase::Ready;
+    // 外部服务不归我们停/启，更新时不做无意义的断开-重连。
+    let was_ready = {
+        let runtime = state.runtime.lock().map_err(|_| "启动器状态锁已损坏")?;
+        runtime.phase == Phase::Ready && !runtime.external
+    };
     // npm install -g 会重写正在运行的安装目录，先停服务，更新完再恢复。
     if was_ready {
         stop_process(&app, state.inner())?;
@@ -1567,12 +1675,11 @@ fn run_plugin_action(
         return Err("插件标识包含不支持的字符".into());
     }
     let config = read_config(app)?;
-    let was_ready = state
-        .runtime
-        .lock()
-        .map_err(|_| "启动器状态锁已损坏")?
-        .phase
-        == Phase::Ready;
+    // 外部服务不归我们停/启，插件操作只改 profile 文件，改完由用户自行重启生效。
+    let was_ready = {
+        let runtime = state.runtime.lock().map_err(|_| "启动器状态锁已损坏")?;
+        runtime.phase == Phase::Ready && !runtime.external
+    };
     if was_ready {
         stop_process(app, state)?;
     }
@@ -1610,29 +1717,158 @@ async fn remove_plugin(
     run_plugin_action(&app, state.inner(), "remove", &spec)
 }
 
+// 标题栏的逻辑高度（px），前端 .titlebar 与这里必须一致；拖拽落点命中
+// 其他窗口的这段区域时视为“拖入标签栏”。
+const TITLEBAR_LOGICAL_HEIGHT: f64 = 35.0;
+
+fn next_window_label() -> String {
+    static WINDOW_COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "control-{}",
+        WINDOW_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+    )
+}
+
+fn reveal_window_fallback(window: tauri::WebviewWindow) {
+    // 窗口以隐藏状态创建，由前端首帧就绪后 show()，避免启动白屏。这里兜底：
+    // 前端脚本万一没跑起来，也要在几秒内把窗口亮出来，不能凭空消失。
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(3));
+        if !window.is_visible().unwrap_or(true) {
+            let _ = window.show();
+        }
+    });
+}
+
+fn spawn_launcher_window(
+    app: &AppHandle,
+    state: &AppState,
+    initial_tab: Option<String>,
+    position: Option<(f64, f64)>,
+    size: Option<(f64, f64)>,
+) -> Result<(), String> {
+    let label = next_window_label();
+    if let Some(title) = initial_tab {
+        if let Ok(mut pending) = state.pending_tabs.lock() {
+            pending.insert(label.clone(), title);
+        }
+    }
+    // Use the app URL so Tauri resolves the dev server in development and
+    // the bundled frontend in production. External URLs do not reliably get
+    // the launcher initialization scripts and window APIs.
+    let (width, height) = size.unwrap_or((880.0, 760.0));
+    let mut builder =
+        WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
+            .title("DSH Launcher")
+            .inner_size(width, height)
+            .min_inner_size(620.0, 560.0)
+            .decorations(false)
+            .visible(false);
+    builder = match position {
+        Some((x, y)) => builder.position(x, y),
+        None => builder.center(),
+    };
+    let window = builder
+        .build()
+        .map_err(|error| format!("无法创建 Launcher 窗口：{error}"))?;
+    reveal_window_fallback(window);
+    Ok(())
+}
+
 // 必须是 async：同步命令在主线程执行，而在主线程上同步创建 WebView 会在
 // Windows 上死锁（wry#583）——新窗口停在白屏，且事件循环被卡住，所有窗口的
 // 拖拽/最小化/关闭全部失效。
 #[tauri::command]
-async fn new_launcher_window(app: AppHandle) -> Result<(), String> {
-    static WINDOW_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let id = format!(
-        "control-{}",
-        WINDOW_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+async fn new_launcher_window(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    spawn_launcher_window(&app, state.inner(), None, None, None)
+}
+
+#[tauri::command]
+fn take_initial_tab(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Option<String> {
+    state
+        .pending_tabs
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.remove(window.label()))
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TabDropOutcome {
+    Adopted,
+    Detached,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AdoptedTab {
+    title: String,
+}
+
+// 标签被拖出窗口后松手：落点在其他 Launcher 窗口的标签栏上就让它收编，
+// 否则在光标处新建一个窗口带走这个标签。必须 async（见 new_launcher_window）。
+#[tauri::command]
+async fn drop_tab(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    title: String,
+    remaining: u32,
+) -> Result<TabDropOutcome, String> {
+    let cursor = app
+        .cursor_position()
+        .map_err(|error| format!("无法获取光标位置：{error}"))?;
+    for (label, target) in app.webview_windows() {
+        if label == window.label() || !label.starts_with("control") {
+            continue;
+        }
+        if target.is_minimized().unwrap_or(false) || !target.is_visible().unwrap_or(false) {
+            continue;
+        }
+        let (Ok(position), Ok(size)) = (target.outer_position(), target.outer_size()) else {
+            continue;
+        };
+        let scale = target.scale_factor().unwrap_or(1.0);
+        // 比标题栏多放宽几个像素，拖拽不必像素级精确。
+        let strip_bottom = position.y as f64 + (TITLEBAR_LOGICAL_HEIGHT + 8.0) * scale;
+        let inside_x = cursor.x >= position.x as f64
+            && cursor.x <= position.x as f64 + size.width as f64;
+        let inside_y = cursor.y >= position.y as f64 && cursor.y <= strip_bottom;
+        if inside_x && inside_y {
+            let _ = target.set_focus();
+            app.emit_to(label.as_str(), "adopt-tab", AdoptedTab { title })
+                .map_err(|error| error.to_string())?;
+            return Ok(TabDropOutcome::Adopted);
+        }
+    }
+    if remaining <= 1 {
+        // 窗口里唯一的标签拖到空白处没有意义（新窗口=原窗口），只支持并入其他窗口。
+        return Ok(TabDropOutcome::None);
+    }
+    let monitor_scale = app
+        .monitor_from_point(cursor.x, cursor.y)
+        .ok()
+        .flatten()
+        .map(|monitor| monitor.scale_factor())
+        .unwrap_or(1.0);
+    // 新窗口的标签栏正好落在光标下方一点，观感接近浏览器的拖出。
+    let position = (
+        cursor.x / monitor_scale - 120.0,
+        cursor.y / monitor_scale - 16.0,
     );
-    // Use the app URL so Tauri resolves the dev server in development and
-    // the bundled frontend in production. External URLs do not reliably get
-    // the launcher initialization scripts and window APIs.
-    let webview_url = WebviewUrl::App("index.html".into());
-    WebviewWindowBuilder::new(&app, id, webview_url)
-        .title("DSH Launcher")
-        .inner_size(880.0, 760.0)
-        .min_inner_size(620.0, 560.0)
-        .center()
-        .decorations(false)
-        .build()
-        .map_err(|error| format!("无法创建 Launcher 窗口：{error}"))?;
-    Ok(())
+    // 拖出的窗口沿用来源窗口的尺寸。
+    let size = window
+        .inner_size()
+        .ok()
+        .map(|inner| {
+            let scale = window.scale_factor().unwrap_or(1.0);
+            (
+                (inner.width as f64 / scale).max(620.0),
+                (inner.height as f64 / scale).max(560.0),
+            )
+        });
+    spawn_launcher_window(&app, state.inner(), Some(title), Some(position), size)?;
+    Ok(TabDropOutcome::Detached)
 }
 
 #[tauri::command]
@@ -1732,12 +1968,19 @@ pub fn run() {
             open_external,
             install_plugin,
             remove_plugin,
-            new_launcher_window
+            new_launcher_window,
+            take_initial_tab,
+            drop_tab
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             adopt_login_shell_path();
             setup_tray(app)?;
+            // 主窗口在 tauri.conf.json 里以 visible:false 创建，等前端首帧就绪
+            // 后自行显示；这里挂一个兜底定时器。
+            if let Some(window) = app.get_webview_window("control") {
+                reveal_window_fallback(window);
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1793,6 +2036,43 @@ mod tests {
     fn truncates_diagnostic_lines_on_character_boundaries() {
         assert_eq!(truncate_chars("启动失败", 5), "启动失败");
         assert_eq!(truncate_chars("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn detects_live_http_service_on_busy_port() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::Write;
+                let mut buffer = [0u8; 1024];
+                let _ = Read::read(&mut stream, &mut buffer);
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+            }
+        });
+        assert!(http_service_alive(port));
+        let _ = server.join();
+    }
+
+    #[test]
+    fn treats_free_port_as_no_service() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        assert!(!http_service_alive(port));
+    }
+
+    #[test]
+    fn ignores_listeners_that_close_without_responding() {
+        // 模拟“端口被占但不是 Web 服务”：接受连接后立即断开。
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        let server = thread::spawn(move || {
+            let _ = listener.accept();
+        });
+        assert!(!http_service_alive(port));
+        let _ = server.join();
     }
 
     #[test]
