@@ -16,8 +16,10 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
+    webview::DownloadEvent,
     AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
 };
+use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult};
 
 const MAX_LOG_LINES: usize = 400;
 
@@ -56,6 +58,9 @@ struct LauncherConfig {
     close_behavior: CloseBehavior,
     stop_dsh_on_exit: bool,
     auto_check_updates: bool,
+    download_directory: String,
+    download_ask: bool,
+    download_choose_location: bool,
     window_width: u32,
     window_height: u32,
 }
@@ -63,6 +68,11 @@ struct LauncherConfig {
 impl Default for LauncherConfig {
     fn default() -> Self {
         let working_directory = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .to_string_lossy()
+            .into_owned();
+        let download_directory = dirs::download_dir()
+            .or_else(dirs::home_dir)
             .unwrap_or_else(|| PathBuf::from("."))
             .to_string_lossy()
             .into_owned();
@@ -79,6 +89,9 @@ impl Default for LauncherConfig {
             close_behavior: CloseBehavior::Tray,
             stop_dsh_on_exit: true,
             auto_check_updates: true,
+            download_directory,
+            download_ask: false,
+            download_choose_location: false,
             window_width: 880,
             window_height: 760,
         }
@@ -185,7 +198,9 @@ struct MarketOwnerRaw {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MarketRepoRaw {
+    #[serde(default)]
     name: String,
+    #[serde(default)]
     full_name: String,
     #[serde(default)]
     description: Option<String>,
@@ -210,15 +225,22 @@ struct MarketRepoRaw {
     #[serde(default)]
     category: Option<String>,
     #[serde(default)]
-    verified: bool,
+    categories: Vec<String>,
+    #[serde(default)]
+    validation: Option<MarketValidationRaw>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MarketMeta {
-    id: String,
-    label: String,
+#[derive(Debug, Clone, Deserialize)]
+struct MarketValidationRaw {
     #[serde(default)]
-    color: Option<String>,
+    overall: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MarketApiResponse {
+    schema_version: u64,
+    repositories: Vec<MarketRepoRaw>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -243,10 +265,7 @@ struct MarketPlugin {
 #[derive(Debug, Clone, Serialize)]
 struct MarketCatalog {
     plugins: Vec<MarketPlugin>,
-    categories: Vec<MarketMeta>,
-    types: Vec<MarketMeta>,
     fetched_at: u64,
-    source: String,
 }
 
 struct RuntimeState {
@@ -370,6 +389,11 @@ fn validate_config(config: &LauncherConfig) -> Result<(), String> {
     }
     if matches!(config.launch_mode, LaunchMode::Npx) && !is_safe_package_spec(&config.npx_package) {
         return Err("npm 包名包含不支持的字符".into());
+    }
+    if config.download_directory.trim().is_empty()
+        || !Path::new(config.download_directory.trim()).is_absolute()
+    {
+        return Err("下载目录必须是绝对路径".into());
     }
     if config
         .trusted_hosts
@@ -1596,30 +1620,19 @@ async fn search_plugins(query: String) -> Result<Vec<PluginSearchResult>, String
     Ok(results)
 }
 
-const MARKET_URL: &str = "https://dsh.aitreez.com/";
+const MARKET_API_URL: &str = "https://dsh.aitreez.com/catalog.json";
 
-// 商店站点没有独立的 JSON 接口，目录以 <script id="..." type="application/json">
-// 内嵌在首页里（站点自己的前端也从这里读），这里按 id 抽出脚本内容。
-fn extract_embedded_json<'a>(html: &'a str, script_id: &str) -> Option<&'a str> {
-    let marker = format!("id=\"{script_id}\"");
-    let id_pos = html.find(&marker)?;
-    let tag_end = id_pos + html[id_pos..].find('>')? + 1;
-    let close = tag_end + html[tag_end..].find("</script>")?;
-    Some(html[tag_end..close].trim())
-}
-
-fn parse_market_html(html: &str) -> Result<MarketCatalog, String> {
-    let catalog_json = extract_embedded_json(html, "catalog-data")
-        .ok_or("插件商店页面里没有找到 catalog-data，站点结构可能已更新")?;
-    let raw: Vec<MarketRepoRaw> = serde_json::from_str(catalog_json)
-        .map_err(|error| format!("插件目录数据解析失败：{error}"))?;
-    let categories: Vec<MarketMeta> = extract_embedded_json(html, "category-data")
-        .and_then(|json| serde_json::from_str(json).ok())
-        .unwrap_or_default();
-    let types: Vec<MarketMeta> = extract_embedded_json(html, "type-data")
-        .and_then(|json| serde_json::from_str(json).ok())
-        .unwrap_or_default();
-    let plugins = raw
+fn parse_market_catalog(json: &str) -> Result<MarketCatalog, String> {
+    let response: MarketApiResponse = serde_json::from_str(json)
+        .map_err(|error| format!("插件目录 API 响应解析失败：{error}"))?;
+    if response.schema_version != 1 {
+        return Err(format!(
+            "插件目录 API 版本不兼容：schemaVersion={}",
+            response.schema_version
+        ));
+    }
+    let plugins = response
+        .repositories
         .into_iter()
         .map(|repo| MarketPlugin {
             spec: format!("github:{}", repo.full_name),
@@ -1635,16 +1648,19 @@ fn parse_market_html(html: &str) -> Result<MarketCatalog, String> {
             pushed_at: repo.pushed_at.unwrap_or_default(),
             archived: repo.archived,
             project_type: repo.project_type.unwrap_or_else(|| "unknown".into()),
-            category: repo.category.unwrap_or_else(|| "other".into()),
-            verified: repo.verified,
+            category: repo
+                .category
+                .or_else(|| repo.categories.first().cloned())
+                .unwrap_or_else(|| "other".into()),
+            verified: repo
+                .validation
+                .as_ref()
+                .is_some_and(|validation| validation.overall == "verified"),
         })
         .collect();
     Ok(MarketCatalog {
         plugins,
-        categories,
-        types,
         fetched_at: epoch_secs(),
-        source: MARKET_URL.trim_end_matches('/').to_string(),
     })
 }
 
@@ -1654,16 +1670,17 @@ fn fetch_market_catalog() -> Result<MarketCatalog, String> {
         .user_agent(concat!("dsh-launcher/", env!("CARGO_PKG_VERSION")))
         .build();
     let response = agent
-        .get(MARKET_URL)
+        .get(MARKET_API_URL)
+        .set("Accept", "application/json")
         .call()
-        .map_err(|error| format!("无法访问插件商店：{error}"))?;
-    let mut html = String::new();
+        .map_err(|error| format!("无法访问插件商店 API：{error}"))?;
+    let mut json = String::new();
     response
         .into_reader()
         .take(20 * 1024 * 1024)
-        .read_to_string(&mut html)
-        .map_err(|error| format!("插件商店响应读取失败：{error}"))?;
-    parse_market_html(&html)
+        .read_to_string(&mut json)
+        .map_err(|error| format!("插件商店 API 响应读取失败：{error}"))?;
+    parse_market_catalog(&json)
 }
 
 #[tauri::command]
@@ -1805,14 +1822,122 @@ fn reveal_window_fallback(window: tauri::WebviewWindow) {
     });
 }
 
-fn spawn_launcher_window(
+fn fallback_download_directory() -> PathBuf {
+    dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn safe_download_file_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|character| {
+            if character.is_control() || r#"<>:\"/|?*"#.contains(character) {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.');
+    if trimmed.is_empty() {
+        "download".into()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn unique_download_path(directory: &Path, file_name: &str) -> PathBuf {
+    let candidate = directory.join(file_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("download");
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    for index in 1..100_000 {
+        let candidate = directory.join(format!("{stem} ({index}){extension}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    directory.join(format!("{stem}-{}{extension}", epoch_secs()))
+}
+
+fn confirm_download(file_name: &str) -> bool {
+    matches!(
+        MessageDialog::new()
+            .set_title("DSH Launcher")
+            .set_description(format!("是否下载“{file_name}”？"))
+            .set_buttons(MessageButtons::OkCancel)
+            .show(),
+        MessageDialogResult::Ok
+    )
+}
+
+fn choose_download_path(directory: &Path, file_name: &str) -> Option<PathBuf> {
+    FileDialog::new()
+        .set_directory(directory)
+        .set_file_name(file_name)
+        .save_file()
+}
+
+fn handle_download_request(
+    app: &AppHandle,
+    url: &tauri::Url,
+    destination: &mut PathBuf,
+) -> bool {
+    let config = read_config(app).unwrap_or_default();
+    let suggested_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(safe_download_file_name)
+        .unwrap_or_else(|| "download".into());
+    let default_directory = {
+        let configured = PathBuf::from(config.download_directory.trim());
+        if configured.is_absolute() {
+            configured
+        } else {
+            fallback_download_directory()
+        }
+    };
+    if config.download_choose_location {
+        return choose_download_path(&default_directory, &suggested_name)
+            .map(|path| {
+                if !path.is_absolute() {
+                    return false;
+                }
+                *destination = path;
+                true
+            })
+            .unwrap_or(false);
+    }
+    if let Err(error) = fs::create_dir_all(&default_directory) {
+        eprintln!("无法创建下载目录 {}：{error}", default_directory.display());
+        return false;
+    }
+    if config.download_ask && !confirm_download(&suggested_name) {
+        return false;
+    }
+    *destination = unique_download_path(&default_directory, &suggested_name);
+    eprintln!("下载 {} 到 {}", url, destination.display());
+    true
+}
+
+fn spawn_launcher_window_named(
     app: &AppHandle,
     state: &AppState,
+    label: String,
     initial_tab: Option<String>,
     position: Option<(f64, f64)>,
     size: Option<(f64, f64)>,
 ) -> Result<(), String> {
-    let label = next_window_label();
     if let Some(title) = initial_tab {
         if let Ok(mut pending) = state.pending_tabs.lock() {
             pending.insert(label.clone(), title);
@@ -1827,17 +1952,52 @@ fn spawn_launcher_window(
             .title("DSH Launcher")
             .inner_size(width, height)
             .min_inner_size(620.0, 560.0)
+            .resizable(true)
             .decorations(false)
             .visible(false);
     builder = match position {
         Some((x, y)) => builder.position(x, y),
         None => builder.center(),
     };
+    let download_app = app.clone();
     let window = builder
+        .on_download(move |_webview, event| match event {
+            DownloadEvent::Requested { url, destination } => {
+                handle_download_request(&download_app, &url, destination)
+            }
+            DownloadEvent::Finished { url, path, success } => {
+                if success {
+                    if let Some(path) = path {
+                        eprintln!("下载完成 {url}：{}", path.display());
+                    }
+                } else {
+                    eprintln!("下载失败 {url}");
+                }
+                true
+            }
+            _ => true,
+        })
         .build()
         .map_err(|error| format!("无法创建 Launcher 窗口：{error}"))?;
     reveal_window_fallback(window);
     Ok(())
+}
+
+fn spawn_launcher_window(
+    app: &AppHandle,
+    state: &AppState,
+    initial_tab: Option<String>,
+    position: Option<(f64, f64)>,
+    size: Option<(f64, f64)>,
+) -> Result<(), String> {
+    spawn_launcher_window_named(
+        app,
+        state,
+        next_window_label(),
+        initial_tab,
+        position,
+        size,
+    )
 }
 
 // 必须是 async：同步命令在主线程执行，而在主线程上同步创建 WebView 会在
@@ -2041,11 +2201,15 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             adopt_login_shell_path();
             setup_tray(app)?;
-            // 主窗口在 tauri.conf.json 里以 visible:false 创建，等前端首帧就绪
-            // 后自行显示；这里挂一个兜底定时器。
-            if let Some(window) = app.get_webview_window("control") {
-                reveal_window_fallback(window);
-            }
+            // 主窗口也通过 builder 创建，这样它和分离出来的窗口都能挂载下载回调。
+            spawn_launcher_window_named(
+                &app.handle(),
+                app.state::<AppState>().inner(),
+                "control".into(),
+                None,
+                None,
+                None,
+            )?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -2141,27 +2305,21 @@ mod tests {
     }
 
     #[test]
-    fn extracts_embedded_json_by_script_id() {
-        let html = r#"<html><body><div id="app"></div><script id="catalog-data" type="application/json">[{"a":1}]</script><script id="category-data" type="application/json"> [] </script></body></html>"#;
-        assert_eq!(
-            extract_embedded_json(html, "catalog-data"),
-            Some(r#"[{"a":1}]"#)
-        );
-        assert_eq!(extract_embedded_json(html, "category-data"), Some("[]"));
-        assert_eq!(extract_embedded_json(html, "missing-data"), None);
-    }
-
-    #[test]
-    fn parses_market_catalog_html() {
-        let html = r##"<script id="catalog-data" type="application/json">[{"name":"dsh-web-ui","fullName":"o/dsh-web-ui","description":"d","url":"https://github.com/o/dsh-web-ui","owner":{"login":"o","avatarUrl":"https://avatars.githubusercontent.com/u/1"},"topics":["dsh-plugin"],"language":"TypeScript","stars":12,"pushedAt":"2026-08-14T00:00:00Z","archived":false,"projectType":"plugin","category":"ui","verified":true}]</script><script id="category-data" type="application/json">[{"id":"ui","label":"界面增强","color":"#a0c3ec"}]</script><script id="type-data" type="application/json">[{"id":"plugin","label":"插件"}]</script>"##;
-        let catalog = parse_market_html(html).expect("catalog should parse");
+    fn parses_market_catalog_api() {
+        let json = r##"{"schemaVersion":1,"repositories":[{"repositoryId":1,"name":"dsh-web-ui","fullName":"o/dsh-web-ui","description":"d","url":"https://github.com/o/dsh-web-ui","owner":{"login":"o","avatarUrl":"https://avatars.githubusercontent.com/u/1"},"topics":["dsh-plugin"],"language":"TypeScript","stars":12,"pushedAt":"2026-08-14T00:00:00Z","archived":false,"projectType":"plugin","category":"ui","categories":["ui"],"validation":{"overall":"verified"}}]}"##;
+        let catalog = parse_market_catalog(json).expect("catalog should parse");
         assert_eq!(catalog.plugins.len(), 1);
         let plugin = &catalog.plugins[0];
         assert_eq!(plugin.spec, "github:o/dsh-web-ui");
         assert_eq!(plugin.category, "ui");
         assert!(plugin.verified);
-        assert_eq!(catalog.categories[0].color.as_deref(), Some("#a0c3ec"));
-        assert_eq!(catalog.types[0].label, "插件");
+    }
+
+    #[test]
+    fn rejects_unknown_market_catalog_schema() {
+        let error = parse_market_catalog(r##"{"schemaVersion":2,"repositories":[]}"##)
+            .expect_err("unknown schema should be rejected");
+        assert!(error.contains("schemaVersion=2"));
     }
 
     #[test]
@@ -2173,7 +2331,6 @@ mod tests {
             .plugins
             .iter()
             .all(|plugin| plugin.spec.starts_with("github:")));
-        assert!(!catalog.categories.is_empty());
     }
 
     #[cfg(windows)]

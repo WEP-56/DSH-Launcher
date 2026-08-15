@@ -51,6 +51,9 @@ interface LauncherConfig {
   close_behavior: "tray" | "exit";
   stop_dsh_on_exit: boolean;
   auto_check_updates: boolean;
+  download_directory: string;
+  download_ask: boolean;
+  download_choose_location: boolean;
   window_width: number;
   window_height: number;
 }
@@ -98,7 +101,7 @@ interface MarketPlugin {
   avatar_url: string; topics: string[]; language: string; stars: number; pushed_at: string;
   archived: boolean; project_type: string; category: string; verified: boolean;
 }
-interface MarketCatalog { plugins: MarketPlugin[]; categories: MarketMeta[]; types: MarketMeta[]; fetched_at: number; source: string; }
+interface MarketCatalog { plugins: MarketPlugin[]; fetched_at: number; }
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 app.innerHTML = `
@@ -202,6 +205,11 @@ app.innerHTML = `
           <div class="settings-section"><p class="eyebrow">WINDOW</p><h3>关闭按钮行为</h3><div class="segmented wide"><label><input type="radio" name="close_behavior" value="tray"><span>最小化到托盘</span></label><label><input type="radio" name="close_behavior" value="exit"><span>退出 Launcher</span></label></div></div>
           <label class="check-row"><input id="setting-auto-start" type="checkbox"><span><strong>启动后自动启动 dsh Web 服务</strong><small>Launcher 打开后立即启动本地服务</small></span></label>
           <label class="check-row"><input id="setting-stop-dsh" type="checkbox"><span><strong>退出 Launcher 时结束 dsh</strong><small>只结束由当前 Launcher 启动并登记的进程树</small></span></label>
+          <div class="settings-section download-section"><p class="eyebrow">DOWNLOAD</p><h3>下载</h3>
+            <div class="field full"><label for="setting-download-directory">默认下载目录</label><div class="path-input"><input id="setting-download-directory" autocomplete="off" spellcheck="false"><button id="browse-download-directory" type="button" class="icon-button" title="选择下载目录"><i data-lucide="folder-open"></i></button></div></div>
+            <label class="check-row"><input id="setting-download-ask" type="checkbox"><span><strong>下载前确认</strong><small>每次下载前弹出确认提示</small></span></label>
+            <label class="check-row compact"><input id="setting-download-choose" type="checkbox"><span><strong>下载前选择保存位置</strong><small>显示“另存为”对话框，可同时修改文件名</small></span></label>
+          </div>
           <div class="settings-section about-section"><p class="eyebrow">ABOUT</p><h3>关于 DSH Launcher</h3><p class="about-copy">当前版本 <strong id="launcher-version">读取中</strong></p><div class="about-actions"><a class="button quiet" data-external href="https://github.com/WEP-56/DSH-Launcher"><i data-lucide="github"></i><span>GitHub 仓库</span></a><button id="check-launcher-update" class="button quiet"><i data-lucide="refresh-cw"></i><span>检查更新</span></button></div><label class="check-row compact"><input id="setting-auto-update" type="checkbox"><span>自动检查 Launcher 更新</span></label></div>
         </div>
         <footer class="modal-footer"><span id="settings-save-result"></span><button id="save-settings" class="button primary"><i data-lucide="save"></i><span>保存设置</span></button></footer>
@@ -231,8 +239,31 @@ let activeTab = 0;
 let tabSequence = 0;
 let tabNameSequence = 0;
 let market: MarketCatalog | null = null;
-let marketCategories = new Map<string, MarketMeta>();
-let marketTypes = new Map<string, MarketMeta>();
+const marketCategoryMeta: MarketMeta[] = [
+  { id: "ui", label: "界面增强", color: "#a0c3ec" },
+  { id: "agent-session", label: "Agent 与会话", color: "#c4b5fd" },
+  { id: "development", label: "开发工具", color: "#ffffff" },
+  { id: "communication", label: "消息通讯", color: "#ffc285" },
+  { id: "data", label: "文件与数据", color: "#8ed6c4" },
+  { id: "model-mcp", label: "模型与 MCP", color: "#9bb7ff" },
+  { id: "security", label: "安全与治理", color: "#ff9c8c" },
+  { id: "operations", label: "部署运维", color: "#d0d3d8" },
+  { id: "lifestyle", label: "生活娱乐", color: "#ffb3d1" },
+  { id: "research", label: "学习研究", color: "#b7d987" },
+  { id: "other", label: "其他", color: "#7d8187" },
+];
+const marketTypeMeta: MarketMeta[] = [
+  { id: "plugin", label: "插件" },
+  { id: "skill", label: "技能" },
+  { id: "collection", label: "插件合集" },
+  { id: "channel", label: "渠道适配" },
+  { id: "application", label: "完整应用" },
+  { id: "infrastructure", label: "基础设施" },
+  { id: "directory", label: "索引目录" },
+  { id: "unknown", label: "待识别" },
+];
+const marketCategories = new Map(marketCategoryMeta.map((item) => [item.id, item]));
+const marketTypes = new Map(marketTypeMeta.map((item) => [item.id, item]));
 let marketShown = 0;
 let marketSearchTimer: number | undefined;
 let pendingUpdate: LauncherUpdateInfo | null = null;
@@ -276,6 +307,9 @@ function fillSettings(): void {
   $<HTMLInputElement>(`input[name="close_behavior"][value="${config.close_behavior}"]`).checked = true;
   $("#setting-auto-start").checked = config.auto_start;
   $("#setting-stop-dsh").checked = config.stop_dsh_on_exit;
+  $("#setting-download-directory").value = config.download_directory;
+  $("#setting-download-ask").checked = config.download_ask;
+  $("#setting-download-choose").checked = config.download_choose_location;
   $("#setting-auto-update").checked = config.auto_check_updates;
   $("#launcher-version").textContent = launcherVersion;
   if (currentWindow.label === "control") $("#window-close").title = config.close_behavior === "tray" ? "关闭到托盘" : "退出 Launcher";
@@ -285,6 +319,9 @@ function readSettings(): LauncherConfig {
     close_behavior: ($<HTMLInputElement>("input[name=close_behavior]:checked")).value as "tray" | "exit",
     auto_start: $("#setting-auto-start").checked,
     stop_dsh_on_exit: $("#setting-stop-dsh").checked,
+    download_directory: $("#setting-download-directory").value.trim(),
+    download_ask: $("#setting-download-ask").checked,
+    download_choose_location: $("#setting-download-choose").checked,
     auto_check_updates: $("#setting-auto-update").checked,
   };
 }
@@ -684,7 +721,7 @@ async function searchPlugins(): Promise<void> {
 function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char] ?? char)); }
 function escapeAttr(value: string): string { return escapeHtml(value).replace(/`/g, "&#096;"); }
 
-// —— 插件商店（数据来自 dsh.aitreez.com，后端抓取并缓存）——
+// —— 插件商店（数据来自 dsh.aitreez.com API，后端获取并缓存）——
 function safeColor(value: string | null | undefined): string {
   return value && /^#[0-9a-fA-F]{3,8}$/.test(value) ? value : "#7d8187";
 }
@@ -741,7 +778,17 @@ function filteredMarket(): MarketPlugin[] {
     items = items.filter((plugin) =>
       `${plugin.name} ${plugin.full_name} ${plugin.description} ${plugin.language} ${plugin.topics.join(" ")}`.toLowerCase().includes(query));
   }
-  if (marketFilter.sort === "stars") items = [...items].sort((a, b) => b.stars - a.stars);
+  if (marketFilter.sort === "stars") {
+    items = [...items].sort((a, b) => b.stars - a.stars);
+  } else {
+    items = [...items].sort((a, b) => {
+      const aTime = Date.parse(a.pushed_at);
+      const bTime = Date.parse(b.pushed_at);
+      if (Number.isNaN(aTime)) return Number.isNaN(bTime) ? 0 : 1;
+      if (Number.isNaN(bTime)) return -1;
+      return bTime - aTime;
+    });
+  }
   return items;
 }
 
@@ -783,7 +830,7 @@ function populateMarketFilters(): void {
   const typeSelect = $<HTMLSelectElement>("#market-type");
   typeSelect.innerHTML = [
     `<option value="all">全部类型 (${market.plugins.length})</option>`,
-    ...market.types.filter((item) => typeCounts.has(item.id))
+    ...marketTypeMeta.filter((item) => typeCounts.has(item.id))
       .map((item) => `<option value="${escapeAttr(item.id)}">${escapeHtml(item.label)} (${typeCounts.get(item.id)})</option>`),
   ].join("");
   if (marketFilter.type !== "all" && !typeCounts.has(marketFilter.type)) marketFilter.type = "all";
@@ -791,7 +838,7 @@ function populateMarketFilters(): void {
   const categorySelect = $<HTMLSelectElement>("#market-category");
   categorySelect.innerHTML = [
     `<option value="all">全部分类</option>`,
-    ...market.categories.filter((item) => categoryCounts.has(item.id))
+    ...marketCategoryMeta.filter((item) => categoryCounts.has(item.id))
       .map((item) => `<option value="${escapeAttr(item.id)}">${escapeHtml(item.label)} (${categoryCounts.get(item.id)})</option>`),
   ].join("");
   if (marketFilter.category !== "all" && !categoryCounts.has(marketFilter.category)) marketFilter.category = "all";
@@ -806,8 +853,6 @@ async function loadMarket(force: boolean): Promise<boolean> {
   }
   try {
     market = await invoke<MarketCatalog>("fetch_market", { force });
-    marketCategories = new Map(market.categories.map((item) => [item.id, item]));
-    marketTypes = new Map(market.types.map((item) => [item.id, item]));
     populateMarketFilters();
     resetMarketList();
     return true;
@@ -885,6 +930,7 @@ document.addEventListener("click", (event) => {
   }
 });
 $("#browse-workspace").addEventListener("click", async () => { const selected = await open({ directory: true, multiple: false, defaultPath: $("#working-directory").value || undefined }); if (typeof selected === "string") $("#working-directory").value = selected; });
+$("#browse-download-directory").addEventListener("click", async () => { const selected = await open({ directory: true, multiple: false, defaultPath: $("#setting-download-directory").value || undefined }); if (typeof selected === "string") $("#setting-download-directory").value = selected; });
 $("#refresh-web").addEventListener("click", refreshWeb);
 $("#tab-add").addEventListener("click", () => addTab());
 // 标签多到放不下时用滚轮横向滚动标签条。

@@ -147,6 +147,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 .settings-content { padding: 18px; }
 .settings-section { padding-bottom: 17px; border-bottom: 1px solid var(--border); }
 .settings-section h3 { margin: 3px 0 10px; font-size: 13px; font-weight: 650; }
+.download-section { padding-top: 17px; }
+.download-section .field { margin-top: 10px; }
 .segmented.wide { display: grid; width: 100%; grid-template-columns: 1fr 1fr; }
 .check-row { display: flex; align-items: flex-start; gap: 9px; padding: 14px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
 .check-row input { width: 15px; height: 15px; margin: 1px 0 0; accent-color: var(--accent); }

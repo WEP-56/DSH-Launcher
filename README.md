@@ -6,7 +6,7 @@
 
 一个基于 Tauri 2 的 DeepSeek Harness 桌面启动器。它负责启动和停止 `dsh web`，主窗口以浏览器式标签页承载 dsh WebUI；包管理、配置文件编辑、插件安装和新窗口入口都收纳在窄工具栏的弹窗里。
 
-插件目录使用 [DSH 插件商店](https://dsh.aitreez.com/) 的公开页面，仅在用户打开插件弹窗时加载一次；安装通过 dsh 官方命令完成，例如 `dsh plugin --profile web add github:omdsh-dev/DSH-better-sidebar`。
+插件目录使用 [DSH 插件商店](https://dsh.aitreez.com/) 提供的 `catalog.json` API，仅在用户打开插件弹窗时加载一次；安装通过 dsh 官方命令完成，例如 `dsh plugin --profile web add github:omdsh-dev/DSH-better-sidebar`。
 
 ## 界面截图
 
