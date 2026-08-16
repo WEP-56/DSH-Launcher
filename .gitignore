@@ -20,6 +20,7 @@ pnpm-debug.log*
 Thumbs.db
 .idea/
 .vscode/
+.claude/
 
 # Test and build output
 coverage/

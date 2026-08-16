@@ -50,10 +50,10 @@ interface LauncherConfig {
   open_on_ready: boolean;
   close_behavior: "tray" | "exit";
   stop_dsh_on_exit: boolean;
-  auto_check_updates: boolean;
   download_directory: string;
   download_ask: boolean;
   download_choose_location: boolean;
+  auto_check_updates: boolean;
   window_width: number;
   window_height: number;
 }
@@ -83,6 +83,17 @@ interface PackageInfo {
   detail: string;
 }
 
+interface ReleaseInfo {
+  current_version: string;
+  latest_version: string;
+  tag_name: string;
+  name: string;
+  body: string;
+  html_url: string;
+  published_at: string;
+  update_available: boolean;
+}
+
 interface ConfigFileInfo {
   id: string;
   name: string;
@@ -94,7 +105,6 @@ interface ConfigFileInfo {
 interface InstalledPlugin { name: string; version: string; bundle: boolean; }
 interface PluginSearchResult { name: string; version: string; description: string; homepage: string; npm_url: string; keywords: string[]; }
 interface OperationResult { success: boolean; output: string; }
-interface LauncherUpdateInfo { current_version: string; latest_version: string; tag_name: string; release_url: string; release_name: string; notes: string; installer_name?: string; installer_size?: number; }
 interface MarketMeta { id: string; label: string; color?: string | null; }
 interface MarketPlugin {
   name: string; full_name: string; spec: string; description: string; url: string; homepage: string;
@@ -116,6 +126,7 @@ app.innerHTML = `
       </nav>
       <div id="tab-zone" class="tab-zone" data-tauri-drag-region>
         <div id="tab-strip" class="tab-strip" role="tablist" aria-label="dsh 标签页"></div>
+        <div id="tab-drop-indicator" class="tab-drop-indicator" aria-hidden="true" hidden></div>
         <button id="tab-add" class="tab-add" title="新建标签页（Ctrl+T）"><i data-lucide="plus"></i></button>
       </div>
       <nav class="window-controls" aria-label="窗口控制">
@@ -210,17 +221,19 @@ app.innerHTML = `
             <label class="check-row"><input id="setting-download-ask" type="checkbox"><span><strong>下载前确认</strong><small>每次下载前弹出确认提示</small></span></label>
             <label class="check-row compact"><input id="setting-download-choose" type="checkbox"><span><strong>下载前选择保存位置</strong><small>显示“另存为”对话框，可同时修改文件名</small></span></label>
           </div>
-          <div class="settings-section about-section"><p class="eyebrow">ABOUT</p><h3>关于 DSH Launcher</h3><p class="about-copy">当前版本 <strong id="launcher-version">读取中</strong></p><div class="about-actions"><a class="button quiet" data-external href="https://github.com/WEP-56/DSH-Launcher"><i data-lucide="github"></i><span>GitHub 仓库</span></a><button id="check-launcher-update" class="button quiet"><i data-lucide="refresh-cw"></i><span>检查更新</span></button></div><label class="check-row compact"><input id="setting-auto-update" type="checkbox"><span>自动检查 Launcher 更新</span></label></div>
+          <div class="settings-section about-section"><p class="eyebrow">ABOUT</p><h3>关于 DSH Launcher</h3><p class="about-copy">当前版本 <strong id="launcher-version">读取中</strong></p><div class="about-actions"><a class="button quiet" data-external href="https://github.com/WEP-56/DSH-Launcher"><i data-lucide="github"></i><span>GitHub 仓库</span></a><a class="button primary" data-external href="https://github.com/WEP-56/DSH-Launcher/releases"><i data-lucide="external-link"></i><span>前往 Release 下载更新</span></a></div></div>
+          <label class="check-row compact update-check-row"><input id="setting-auto-check-updates" type="checkbox"><span><strong>启动时自动检查更新</strong><small>每次打开 Launcher 时检查 GitHub Release，不会自动下载</small></span></label>
+          <div class="about-actions update-actions"><button id="check-launcher-update" class="button quiet"><i data-lucide="refresh-cw"></i><span>检查更新</span></button></div>
         </div>
         <footer class="modal-footer"><span id="settings-save-result"></span><button id="save-settings" class="button primary"><i data-lucide="save"></i><span>保存设置</span></button></footer>
       </section>
     </div>
     <div id="update-dialog" class="modal" hidden>
-      <div class="modal-backdrop"></div>
+      <div class="modal-backdrop" data-close-modal></div>
       <section class="modal-panel update-panel" role="dialog" aria-modal="true" aria-labelledby="update-title">
-        <header class="modal-header"><div><p class="eyebrow">DSH LAUNCHER</p><h2 id="update-title">发现新版本</h2></div><button id="update-close" class="modal-close" title="稍后处理"><i data-lucide="x"></i></button></header>
-        <div class="update-content"><div class="update-version"><strong id="update-latest"></strong><span>当前版本 <b id="update-current"></b></span></div><p id="update-notes" class="update-notes"></p><p id="update-progress" class="update-progress"></p></div>
-        <footer class="modal-footer"><button id="update-later" class="button quiet">稍后提醒</button><button id="update-confirm" class="button primary"><i data-lucide="download"></i><span>下载并安装</span></button></footer>
+        <header class="modal-header"><div><p class="eyebrow">DSH LAUNCHER</p><h2 id="update-title">发现新版本</h2></div><button class="modal-close" data-close-modal title="关闭"><i data-lucide="x"></i></button></header>
+        <div class="update-content"><div class="update-version-line"><strong id="update-version"></strong><span id="update-published"></span></div><div id="update-body" class="update-body"></div></div>
+        <footer class="modal-footer"><span>更新不会自动下载</span><a id="update-release-link" class="button primary" data-external href="#"><i data-lucide="external-link"></i><span>查看 Release</span></a></footer>
       </section>
     </div>
     <div id="toast" class="toast" role="status" hidden></div>
@@ -266,8 +279,6 @@ const marketCategories = new Map(marketCategoryMeta.map((item) => [item.id, item
 const marketTypes = new Map(marketTypeMeta.map((item) => [item.id, item]));
 let marketShown = 0;
 let marketSearchTimer: number | undefined;
-let pendingUpdate: LauncherUpdateInfo | null = null;
-let updateBusy = false;
 let launcherVersion = "读取中";
 let resizeSaveTimer: number | undefined;
 const MARKET_PAGE = 120;
@@ -290,7 +301,6 @@ function showDialog(id: DialogId): void {
   if (id === "settings-dialog") fillSettings();
 }
 function closeDialogs(): void {
-  if (updateBusy) return;
   document.querySelectorAll<HTMLElement>(".modal").forEach((modal) => { modal.hidden = true; });
 }
 
@@ -310,7 +320,7 @@ function fillSettings(): void {
   $("#setting-download-directory").value = config.download_directory;
   $("#setting-download-ask").checked = config.download_ask;
   $("#setting-download-choose").checked = config.download_choose_location;
-  $("#setting-auto-update").checked = config.auto_check_updates;
+  $("#setting-auto-check-updates").checked = config.auto_check_updates;
   $("#launcher-version").textContent = launcherVersion;
   if (currentWindow.label === "control") $("#window-close").title = config.close_behavior === "tray" ? "关闭到托盘" : "退出 Launcher";
 }
@@ -322,7 +332,7 @@ function readSettings(): LauncherConfig {
     download_directory: $("#setting-download-directory").value.trim(),
     download_ask: $("#setting-download-ask").checked,
     download_choose_location: $("#setting-download-choose").checked,
-    auto_check_updates: $("#setting-auto-update").checked,
+    auto_check_updates: $("#setting-auto-check-updates").checked,
   };
 }
 async function saveSettings(): Promise<void> {
@@ -355,8 +365,9 @@ function updateModeFields(): void {
 const TAB_CLOSE_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>`;
 const TAB_TEAR_DISTANCE = 36;
 
-interface TabDrag { id: number; pointerId: number; startX: number; startY: number; started: boolean; torn: boolean; ghost: HTMLElement | null; }
+interface TabDrag { id: number; pointerId: number; startX: number; startY: number; started: boolean; torn: boolean; ghost: HTMLElement | null; nativePreview: boolean; }
 let tabDrag: TabDrag | null = null;
+let previewMoveFrame = 0;
 
 function tabElement(id: number): HTMLElement | null {
   return document.querySelector<HTMLElement>(`.tab[data-tab-id="${id}"]`);
@@ -482,7 +493,15 @@ function startTabRename(tab: TabState, titleElement: HTMLElement): void {
 function onTabPointerDown(event: PointerEvent, id: number): void {
   if (event.button !== 0 || (event.target as HTMLElement).closest(".tab-close, .tab-rename")) return;
   activateTab(id);
-  tabDrag = { id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, started: false, torn: false, ghost: null };
+  tabDrag = { id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, started: false, torn: false, ghost: null, nativePreview: false };
+}
+
+function moveNativeTabPreview(): void {
+  if (!tabDrag?.nativePreview || previewMoveFrame) return;
+  previewMoveFrame = window.requestAnimationFrame(() => {
+    previewMoveFrame = 0;
+    if (tabDrag?.nativePreview) void invoke("move_tab_drag_preview");
+  });
 }
 
 function setTabTorn(torn: boolean, x: number, y: number): void {
@@ -490,19 +509,45 @@ function setTabTorn(torn: boolean, x: number, y: number): void {
   if (tabDrag.torn !== torn) {
     tabDrag.torn = torn;
     tabElement(tabDrag.id)?.classList.toggle("tearing", torn);
-    if (torn && !tabDrag.ghost) {
-      const tab = tabs.find((item) => item.id === tabDrag!.id);
-      const ghost = document.createElement("div");
-      ghost.className = "tab-ghost";
-      ghost.innerHTML = `<strong>${escapeHtml(tab?.title ?? "")}</strong><small>${tabs.length > 1 ? "松开新建窗口 · 拖到其他窗口顶栏可合并" : "拖到其他窗口顶栏可合并"}</small>`;
-      document.body.append(ghost);
-      tabDrag.ghost = ghost;
-    } else if (!torn) {
-      tabDrag.ghost?.remove();
-      tabDrag.ghost = null;
+    $("#tab-drop-indicator").hidden = torn;
+    tabDrag.ghost?.classList.toggle("outside-window", torn);
+    const tab = tabs.find((item) => item.id === tabDrag!.id);
+    if (torn) {
+      tabDrag.nativePreview = true;
+      void invoke("show_tab_drag_preview", { title: tab?.title ?? "" });
+    } else if (tabDrag.nativePreview) {
+      tabDrag.nativePreview = false;
+      void invoke("hide_tab_drag_preview");
     }
   }
-  if (torn && tabDrag.ghost) tabDrag.ghost.style.transform = `translate(${x + 14}px, ${y + 10}px)`;
+  if (tabDrag.ghost) tabDrag.ghost.style.transform = `translate(${x + 14}px, ${y + 10}px)`;
+  if (torn) moveNativeTabPreview();
+}
+
+function ensureTabGhost(): void {
+  if (!tabDrag || tabDrag.ghost) return;
+  const tab = tabs.find((item) => item.id === tabDrag!.id);
+  const ghost = document.createElement("div");
+  ghost.className = "tab-ghost";
+  ghost.innerHTML = `<span class="tab-ghost-icon">◉</span><strong>${escapeHtml(tab?.title ?? "")}</strong>`;
+  document.body.append(ghost);
+  tabDrag.ghost = ghost;
+}
+
+function updateTabDropIndicator(x: number): void {
+  if (!tabDrag || tabDrag.torn) return;
+  const indicator = $("#tab-drop-indicator");
+  const zone = $("#tab-zone").getBoundingClientRect();
+  const others = tabs.filter((tab) => tab.id !== tabDrag!.id);
+  let left = zone.left + 8;
+  for (const other of others) {
+    const rect = tabElement(other.id)?.getBoundingClientRect();
+    if (!rect) continue;
+    if (x < rect.left + rect.width / 2) { left = rect.left; break; }
+    left = rect.right;
+  }
+  indicator.style.transform = `translateX(${Math.round(left - zone.left)}px)`;
+  indicator.hidden = false;
 }
 
 function reorderDraggedTab(x: number): void {
@@ -518,12 +563,17 @@ function reorderDraggedTab(x: number): void {
   }
   const next = [...others.slice(0, insert), dragged, ...others.slice(insert)];
   if (next.some((tab, index) => tab !== tabs[index])) { tabs = next; renderTabs(); }
+  updateTabDropIndicator(x);
 }
 
 function finishTabDrag(event: PointerEvent, cancelled: boolean): void {
   if (!tabDrag || event.pointerId !== tabDrag.pointerId) return;
   const drag = tabDrag;
   tabDrag = null;
+  if (previewMoveFrame) window.cancelAnimationFrame(previewMoveFrame);
+  previewMoveFrame = 0;
+  if (drag.nativePreview) void invoke("hide_tab_drag_preview");
+  $("#tab-drop-indicator").hidden = true;
   // 纯点击（没拖起来）不重绘标签条：双击重命名依赖两次点击落在同一个元素上。
   if (!drag.started) return;
   drag.ghost?.remove();
@@ -553,6 +603,7 @@ window.addEventListener("pointermove", (event) => {
     try { $("#tab-zone").setPointerCapture(event.pointerId); } catch { /* 不支持时退化为窗口内拖拽 */ }
     document.body.classList.add("tab-dragging");
     tabElement(tabDrag.id)?.classList.add("dragging");
+    ensureTabGhost();
   }
   const zone = $("#tab-zone").getBoundingClientRect();
   const inBand = event.clientY >= zone.top - TAB_TEAR_DISTANCE && event.clientY <= zone.bottom + TAB_TEAR_DISTANCE
@@ -563,6 +614,7 @@ window.addEventListener("pointermove", (event) => {
   } else {
     setTabTorn(true, event.clientX, event.clientY);
   }
+  if (tabDrag.ghost) tabDrag.ghost.style.transform = `translate(${event.clientX + 14}px, ${event.clientY + 10}px)`;
 });
 window.addEventListener("pointerup", (event) => finishTabDrag(event, false));
 window.addEventListener("pointercancel", (event) => finishTabDrag(event, true));
@@ -612,39 +664,38 @@ async function refreshPackageInfo(): Promise<void> {
     $("#package-source").textContent = info.source;
   } catch (error) { $("#package-source").textContent = "检查失败"; toast(String(error), true); }
 }
-function showUpdateDialog(info: LauncherUpdateInfo): void {
-  pendingUpdate = info;
-  $("#update-latest").textContent = `${info.release_name || "DSH Launcher"} · ${info.latest_version}`;
-  $("#update-current").textContent = info.current_version;
-  $("#update-notes").textContent = info.notes || "此版本包含稳定性和兼容性改进。";
-  $("#update-progress").textContent = info.installer_name ? `安装包：${info.installer_name}` : "该 Release 未提供 Windows 安装包";
-  $("#update-confirm").toggleAttribute("disabled", !info.installer_name);
+
+function formatReleaseDate(value: string): string {
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? "" : new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "short", day: "numeric" }).format(date);
+}
+
+function showReleaseDialog(release: ReleaseInfo): void {
+  $("#update-title").textContent = release.name.trim() || "发现新版本";
+  $("#update-version").textContent = release.tag_name || release.latest_version;
+  $("#update-published").textContent = formatReleaseDate(release.published_at);
+  const body = release.body.trim();
+  $("#update-body").innerHTML = body ? escapeHtml(body).replace(/\r?\n/g, "<br>") : "此版本没有发布说明。";
+  const link = $<HTMLAnchorElement>("#update-release-link");
+  link.href = release.html_url;
   $("#update-dialog").hidden = false;
 }
-async function checkLauncherUpdate(silent = false): Promise<void> {
+
+async function checkLauncherUpdate(showNoUpdate = false): Promise<void> {
   const button = $<HTMLButtonElement>("#check-launcher-update");
   button.disabled = true;
   try {
-    const info = await invoke<LauncherUpdateInfo | null>("check_launcher_update");
-    if (info) showUpdateDialog(info);
-    else if (!silent) toast("已是最新版本");
+    const release = await invoke<ReleaseInfo>("check_launcher_update");
+    if (release.update_available) {
+      showReleaseDialog(release);
+      toast(`发现 Launcher 新版本 ${release.latest_version}`);
+    } else if (showNoUpdate) {
+      toast(`当前已是最新版本（${release.current_version}）`);
+    }
   } catch (error) {
-    if (!silent) toast(String(error), true);
-  } finally { button.disabled = false; }
-}
-async function installLauncherUpdate(): Promise<void> {
-  if (!pendingUpdate?.installer_name || updateBusy) return;
-  updateBusy = true;
-  const modal = $("#update-dialog");
-  modal.querySelectorAll<HTMLButtonElement>("button").forEach((button) => { button.disabled = true; });
-  $("#update-progress").textContent = "正在下载安装包，请勿关闭窗口…";
-  try {
-    await invoke<OperationResult>("install_launcher_update", { tagName: pendingUpdate.tag_name });
-  } catch (error) {
-    updateBusy = false;
-    modal.querySelectorAll<HTMLButtonElement>("button").forEach((button) => { button.disabled = false; });
-    $("#update-progress").textContent = String(error);
-    toast(String(error), true);
+    if (showNoUpdate) toast(`检查更新失败：${String(error)}`, true);
+  } finally {
+    button.disabled = false;
   }
 }
 async function saveStartupConfig(): Promise<void> {
@@ -874,10 +925,7 @@ $("#save-config-file").addEventListener("click", () => void saveConfigFile());
 $("#open-config-file").addEventListener("click", () => void invoke("open_dsh_config", { id: $("#config-file-select").value }));
 $("#manage-save").addEventListener("click", () => void saveStartupConfig());
 $("#save-settings").addEventListener("click", () => void saveSettings());
-$("#check-launcher-update").addEventListener("click", () => void checkLauncherUpdate(false));
-$("#update-confirm").addEventListener("click", () => void installLauncherUpdate());
-$("#update-later").addEventListener("click", closeDialogs);
-$("#update-close").addEventListener("click", closeDialogs);
+$("#check-launcher-update").addEventListener("click", () => void checkLauncherUpdate(true));
 $("#check-package").addEventListener("click", () => void refreshPackageInfo());
 $("#update-package").addEventListener("click", async () => {
   const output = $("#manage-output");
@@ -993,7 +1041,7 @@ async function init(): Promise<void> {
   fillSettings();
   renderStatus(loadedStatus);
   await revealWindow();
+  if (currentWindow.label === "control" && config.auto_check_updates) void checkLauncherUpdate(false);
   if (config.auto_start && loadedStatus.phase === "stopped") await runAction("start_dsh");
-  if (config.auto_check_updates) void checkLauncherUpdate(true);
 }
 void init().catch((error) => { void revealWindow(); toast(String(error), true); });

@@ -57,10 +57,10 @@ struct LauncherConfig {
     open_on_ready: bool,
     close_behavior: CloseBehavior,
     stop_dsh_on_exit: bool,
-    auto_check_updates: bool,
     download_directory: String,
     download_ask: bool,
     download_choose_location: bool,
+    auto_check_updates: bool,
     window_width: u32,
     window_height: u32,
 }
@@ -88,10 +88,10 @@ impl Default for LauncherConfig {
             open_on_ready: true,
             close_behavior: CloseBehavior::Tray,
             stop_dsh_on_exit: true,
-            auto_check_updates: true,
             download_directory,
             download_ask: false,
             download_choose_location: false,
+            auto_check_updates: true,
             window_width: 880,
             window_height: 760,
         }
@@ -125,35 +125,6 @@ struct PackageInfo {
     source: String,
     checked_at: String,
     detail: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LauncherReleaseAsset {
-    name: String,
-    browser_download_url: String,
-    size: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LauncherRelease {
-    tag_name: String,
-    name: String,
-    html_url: String,
-    published_at: Option<String>,
-    body: Option<String>,
-    assets: Vec<LauncherReleaseAsset>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct LauncherUpdateInfo {
-    current_version: String,
-    latest_version: String,
-    tag_name: String,
-    release_url: String,
-    release_name: String,
-    notes: String,
-    installer_name: Option<String>,
-    installer_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -228,6 +199,18 @@ struct MarketRepoRaw {
     categories: Vec<String>,
     #[serde(default)]
     validation: Option<MarketValidationRaw>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReleaseInfo {
+    current_version: String,
+    latest_version: String,
+    tag_name: String,
+    name: String,
+    body: String,
+    html_url: String,
+    published_at: String,
+    update_available: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -440,19 +423,6 @@ fn hide_console(command: &mut Command) {
 
 #[cfg(not(windows))]
 fn hide_console(_command: &mut Command) {}
-
-#[cfg(windows)]
-fn detach_process(command: &mut Command) {
-    // The installer must outlive this GUI process.  A new process group keeps
-    // Windows from treating it as part of the launcher's shutdown tree.
-    use std::os::windows::process::CommandExt;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
-}
-
-#[cfg(not(windows))]
-fn detach_process(_command: &mut Command) {}
 
 #[cfg(target_os = "macos")]
 fn adopt_login_shell_path() {
@@ -962,10 +932,15 @@ fn epoch_secs() -> u64 {
         .as_secs()
 }
 
-const LAUNCHER_REPOSITORY: &str = "WEP-56/DSH-Launcher";
+#[tauri::command]
+fn get_launcher_version() -> String {
+    env!("CARGO_PKG_VERSION").into()
+}
 
-fn version_key(value: &str) -> Vec<u64> {
-    value
+const LAUNCHER_RELEASE_API: &str = "https://api.github.com/repos/WEP-56/DSH-Launcher/releases/latest";
+
+fn release_version_key(value: &str) -> Vec<u64> {
+    let mut parts: Vec<u64> = value
         .trim()
         .trim_start_matches(['v', 'V'])
         .split(['.', '-', '+'])
@@ -973,185 +948,52 @@ fn version_key(value: &str) -> Vec<u64> {
             part.chars()
                 .take_while(|ch| ch.is_ascii_digit())
                 .collect::<String>()
+                .parse()
+                .unwrap_or(0)
         })
-        .map(|part| part.parse::<u64>().unwrap_or(0))
-        .collect()
+        .collect();
+    while parts.last() == Some(&0) {
+        parts.pop();
+    }
+    parts
 }
 
-fn latest_launcher_release() -> Result<LauncherRelease, String> {
-    let url = format!("https://api.github.com/repos/{LAUNCHER_REPOSITORY}/releases/latest");
-    let response = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(20))
+#[tauri::command]
+async fn check_launcher_update() -> Result<ReleaseInfo, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(15))
         .user_agent(concat!("dsh-launcher/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .get(&url)
+        .build();
+    let response = agent
+        .get(LAUNCHER_RELEASE_API)
         .set("Accept", "application/vnd.github+json")
         .call()
-        .map_err(|error| format!("无法查询 GitHub Release：{error}"))?;
+        .map_err(|error| format!("无法访问 GitHub Release：{error}"))?;
     let mut body = String::new();
     response
         .into_reader()
         .take(4 * 1024 * 1024)
         .read_to_string(&mut body)
-        .map_err(|error| format!("Release 响应读取失败：{error}"))?;
-    serde_json::from_str(&body).map_err(|error| format!("Release 数据无效：{error}"))
-}
-
-fn release_update_info(release: LauncherRelease) -> LauncherUpdateInfo {
-    let installer = release
-        .assets
-        .iter()
-        .filter(|asset| {
-            let name = asset.name.to_ascii_lowercase();
-            name.ends_with(".exe") || name.ends_with(".msi")
-        })
-        .min_by_key(|asset| {
-            let name = asset.name.to_ascii_lowercase();
-            if name.contains("setup") || name.contains("installer") {
-                0
-            } else {
-                1
-            }
-        });
-    LauncherUpdateInfo {
-        current_version: env!("CARGO_PKG_VERSION").into(),
-        latest_version: release.tag_name.trim_start_matches(['v', 'V']).into(),
-        tag_name: release.tag_name,
-        release_url: release.html_url,
-        release_name: release.name,
-        notes: release.body.unwrap_or_default(),
-        installer_name: installer.map(|asset| asset.name.clone()),
-        installer_size: installer.map(|asset| asset.size),
+        .map_err(|error| format!("GitHub Release 响应无效：{error}"))?;
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|error| format!("GitHub Release 响应无效：{error}"))?;
+    let tag_name = value.get("tag_name").and_then(|item| item.as_str()).unwrap_or_default().to_string();
+    if tag_name.is_empty() {
+        return Err("GitHub 没有可用的最新 Release".into());
     }
-}
-
-#[tauri::command]
-async fn check_launcher_update() -> Result<Option<LauncherUpdateInfo>, String> {
-    let release = latest_launcher_release()?;
-    let info = release_update_info(release);
-    if version_key(&info.latest_version) > version_key(&info.current_version) {
-        Ok(Some(info))
-    } else {
-        Ok(None)
-    }
-}
-
-#[tauri::command]
-fn get_launcher_version() -> String {
-    env!("CARGO_PKG_VERSION").into()
-}
-
-#[tauri::command]
-async fn install_launcher_update(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    tag_name: String,
-) -> Result<OperationResult, String> {
-    let release = latest_launcher_release()?;
-    if release.tag_name != tag_name {
-        return Err("GitHub Release 已发生变化，请重新检查更新".into());
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = app;
-        return Err("当前平台暂不支持自动安装 Launcher 更新，请打开 Release 页面手动安装".into());
-    }
-    #[cfg(windows)]
-    {
-        let asset = release_update_info(release.clone())
-            .installer_name
-            .and_then(|name| release.assets.into_iter().find(|asset| asset.name == name))
-            .ok_or("该 Release 没有 Windows 安装包")?;
-        if Path::new(&asset.name)
-            .file_name()
-            .and_then(|name| name.to_str())
-            != Some(asset.name.as_str())
-        {
-            return Err("安装包文件名无效".into());
-        }
-        if !asset
-            .browser_download_url
-            .starts_with("https://github.com/")
-        {
-            return Err("安装包下载地址不受信任".into());
-        }
-        // Do not reuse a previous download: an old installer can still be
-        // locked by Windows after a failed update attempt.  Keep the asset
-        // extension so Windows selects the correct installer handler.
-        let target = std::env::temp_dir().join(format!(
-            "dsh-launcher-update-{}-{}-{}",
-            epoch_secs(),
-            std::process::id(),
-            asset.name
-        ));
-        if asset.size > 250 * 1024 * 1024 {
-            return Err("安装包超过 250 MB，已拒绝下载".into());
-        }
-        let response = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(180))
-            .user_agent(concat!("dsh-launcher/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .get(&asset.browser_download_url)
-            .call()
-            .map_err(|error| format!("下载安装包失败：{error}"))?;
-        let mut file =
-            fs::File::create(&target).map_err(|error| format!("无法写入安装包：{error}"))?;
-        let mut reader = response.into_reader().take(250 * 1024 * 1024);
-        let downloaded = std::io::copy(&mut reader, &mut file)
-            .map_err(|error| format!("安装包下载不完整：{error}"))?;
-        file.sync_all()
-            .map_err(|error| format!("安装包写入未完成：{error}"))?;
-        if downloaded == 0 || (asset.size > 0 && downloaded != asset.size) {
-            let _ = fs::remove_file(&target);
-            return Err(format!(
-                "安装包下载不完整（收到 {downloaded} 字节，预期 {} 字节）",
-                asset.size
-            ));
-        }
-        // 安装程序可能替换当前目录中的可执行文件；下载成功后再结束 dsh，
-        // 这样网络失败不会破坏用户当前的服务状态。
-        let was_ready = {
-            let runtime = state.runtime.lock().map_err(|_| "启动器状态锁已损坏")?;
-            runtime.phase == Phase::Ready && !runtime.external
-        };
-        let _ = stop_process(&app, state.inner());
-        let mut installer = if target
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("msi"))
-        {
-            let mut command = Command::new("msiexec.exe");
-            command.args(["/i", target.to_string_lossy().as_ref(), "/passive"]);
-            command
-        } else {
-            Command::new(&target)
-        };
-        installer
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        detach_process(&mut installer);
-        if let Err(error) = installer.spawn() {
-            // Do not leave a previously managed dsh service stopped when the
-            // downloaded installer cannot be started.
-            if was_ready {
-                let _ = start_with_feedback(&app, state.inner());
-            }
-            return Err(format!("无法启动安装程序：{error}"));
-        }
-        // Let the child process initialize before tearing down WebView2 and
-        // the Tauri event loop.  Calling app.exit immediately can terminate a
-        // just-created installer on Windows before its first window appears.
-        let app_to_exit = app.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(500));
-            app_to_exit.exit(0);
-        });
-        Ok(OperationResult {
-            success: true,
-            output: format!("已启动安装程序 {}", asset.name),
-        })
-    }
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let latest_version = tag_name.trim_start_matches(['v', 'V']).to_string();
+    let update_available = release_version_key(&latest_version) > release_version_key(&current_version);
+    Ok(ReleaseInfo {
+        current_version,
+        latest_version,
+        tag_name,
+        name: value.get("name").and_then(|item| item.as_str()).unwrap_or_default().to_string(),
+        body: value.get("body").and_then(|item| item.as_str()).unwrap_or_default().to_string(),
+        html_url: value.get("html_url").and_then(|item| item.as_str()).unwrap_or_default().to_string(),
+        published_at: value.get("published_at").and_then(|item| item.as_str()).unwrap_or_default().to_string(),
+        update_available,
+    })
 }
 
 fn kill_child_tree(mut child: Child) {
@@ -1802,6 +1644,7 @@ async fn remove_plugin(
 // 标题栏的逻辑高度（px），前端 .titlebar 与这里必须一致；拖拽落点命中
 // 其他窗口的这段区域时视为“拖入标签栏”。
 const TITLEBAR_LOGICAL_HEIGHT: f64 = 35.0;
+const TAB_DRAG_PREVIEW_LABEL: &str = "tab-drag-preview";
 
 fn next_window_label() -> String {
     static WINDOW_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2000,6 +1843,65 @@ fn spawn_launcher_window(
     )
 }
 
+fn setup_tab_drag_preview(app: &tauri::App) -> tauri::Result<()> {
+    let preview = WebviewWindowBuilder::new(
+        app,
+        TAB_DRAG_PREVIEW_LABEL,
+        WebviewUrl::App("drag-preview.html".into()),
+    )
+    .title("标签拖拽预览")
+    .inner_size(190.0, 30.0)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .visible(false)
+    .build()?;
+    preview.set_ignore_cursor_events(true)?;
+    Ok(())
+}
+
+fn position_tab_drag_preview(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    let preview = app
+        .get_webview_window(TAB_DRAG_PREVIEW_LABEL)
+        .ok_or("标签拖拽预览窗口不可用")?;
+    let cursor = app
+        .cursor_position()
+        .map_err(|error| format!("无法获取光标位置：{error}"))?;
+    preview
+        .set_position(tauri::PhysicalPosition::new(
+            (cursor.x + 14.0).round() as i32,
+            (cursor.y + 10.0).round() as i32,
+        ))
+        .map_err(|error| error.to_string())?;
+    Ok(preview)
+}
+
+#[tauri::command]
+fn show_tab_drag_preview(app: AppHandle, title: String) -> Result<(), String> {
+    let preview = position_tab_drag_preview(&app)?;
+    let title = serde_json::to_string(&title).map_err(|error| error.to_string())?;
+    preview
+        .eval(&format!("window.setTabTitle?.({title})"))
+        .map_err(|error| error.to_string())?;
+    preview.show().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn move_tab_drag_preview(app: AppHandle) -> Result<(), String> {
+    position_tab_drag_preview(&app).map(|_| ())
+}
+
+#[tauri::command]
+fn hide_tab_drag_preview(app: AppHandle) -> Result<(), String> {
+    if let Some(preview) = app.get_webview_window(TAB_DRAG_PREVIEW_LABEL) {
+        preview.hide().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 // 必须是 async：同步命令在主线程执行，而在主线程上同步创建 WebView 会在
 // Windows 上死锁（wry#583）——新窗口停在白屏，且事件循环被卡住，所有窗口的
 // 拖拽/最小化/关闭全部失效。
@@ -2063,6 +1965,15 @@ async fn drop_tab(
             let _ = target.set_focus();
             app.emit_to(label.as_str(), "adopt-tab", AdoptedTab { title })
                 .map_err(|error| error.to_string())?;
+            // 被拆出的窗口只剩这一枚标签时，并入目标窗口后应立即销毁源窗口。
+            // 稍作延迟，让命令结果先回到前端；主窗口不能关闭，否则会触发托盘退出逻辑。
+            if window.label() != "control" && remaining <= 1 {
+                let source = window.clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(80));
+                    let _ = source.close();
+                });
+            }
             return Ok(TabDropOutcome::Adopted);
         }
     }
@@ -2184,9 +2095,8 @@ pub fn run() {
             open_dsh_config,
             get_package_info,
             update_dsh,
-            check_launcher_update,
-            install_launcher_update,
             get_launcher_version,
+            check_launcher_update,
             list_plugins,
             search_plugins,
             fetch_market,
@@ -2195,6 +2105,9 @@ pub fn run() {
             remove_plugin,
             new_launcher_window,
             take_initial_tab,
+            show_tab_drag_preview,
+            move_tab_drag_preview,
+            hide_tab_drag_preview,
             drop_tab
         ])
         .setup(|app| {
@@ -2210,6 +2123,7 @@ pub fn run() {
                 None,
                 None,
             )?;
+            setup_tab_drag_preview(app)?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -2265,6 +2179,13 @@ mod tests {
     fn truncates_diagnostic_lines_on_character_boundaries() {
         assert_eq!(truncate_chars("启动失败", 5), "启动失败");
         assert_eq!(truncate_chars("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn compares_release_tags_as_versions() {
+        assert_eq!(release_version_key("v0.6.0"), release_version_key("0.6"));
+        assert!(release_version_key("v0.6.1") > release_version_key("0.6.0"));
+        assert!(!(release_version_key("0.6.0-beta") > release_version_key("0.6.0")));
     }
 
     #[test]

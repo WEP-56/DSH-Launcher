@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>标签拖拽预览</title>
+    <style>
+      :root { color-scheme: light dark; }
+      * { box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
+      body { padding: 1px; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+      .preview { width: 100%; height: 28px; display: flex; align-items: center; gap: 7px; padding: 0 10px; border: 1px solid #2d6df6; border-radius: 6px; background: #f7f8fa; color: #20242a; box-shadow: 0 8px 20px rgba(15, 19, 26, .28); }
+      .icon { flex: none; color: #2d6df6; font-size: 12px; line-height: 1; }
+      #title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 650; }
+      @media (prefers-color-scheme: dark) {
+        .preview { background: #202226; color: #f0f1f3; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="preview"><span class="icon">◉</span><strong id="title"></strong></div>
+    <script>
+      window.setTabTitle = (title) => { document.getElementById("title").textContent = title; };
+    </script>
+  </body>
+</html>
