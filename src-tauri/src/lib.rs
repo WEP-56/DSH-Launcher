@@ -1853,12 +1853,15 @@ fn setup_tab_drag_preview(app: &tauri::App) -> tauri::Result<()> {
     .inner_size(190.0, 30.0)
     .resizable(false)
     .decorations(false)
-    .transparent(true)
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
-    .visible(false)
-    .build()?;
+    .visible(false);
+    // `.transparent(true)` 需要 Tauri 的 `macos-private-api` feature，在 macOS 上
+    // 该 API 默认未暴露（且开启私有 API 会影响上架/公证），故仅在非 macOS 启用。
+    #[cfg(not(target_os = "macos"))]
+    let preview = preview.transparent(true);
+    let preview = preview.build()?;
     preview.set_ignore_cursor_events(true)?;
     Ok(())
 }
