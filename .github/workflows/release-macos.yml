@@ -1,0 +1,66 @@
+name: Release macOS
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  publish-tauri:
+    name: Build and release macOS app
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable (universal target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # 同时拉取 x86_64 与 aarch64 标准库，便于产出通用二进制。
+          targets: universal-apple-darwin
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and publish macOS release
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 可选：在仓库 Secrets 中配置以下变量后自动签名并公证。
+          # 留空时产出未签名的 .app/.dmg（本地可用，但首次打开会被 Gatekeeper 拦截）。
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tauriScript: npm run tauri
+          # 产出同时支持 Apple Silicon 与 Intel 的通用二进制。
+          args: --target universal-apple-darwin
+          tagName: ${{ github.ref_name }}
+          releaseName: DSH Launcher ${{ github.ref_name }}
+          releaseBody: |
+            DSH Launcher macOS release (universal) for ${{ github.ref_name }}.
+
+            Download the .dmg below — it runs on both Apple Silicon and Intel Macs.
+            If Gatekeeper blocks it, right-click the app and choose Open, or run
+            `xattr -cr /Applications/DSH\ Launcher.app`.
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
