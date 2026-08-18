@@ -240,6 +240,11 @@ app.innerHTML = `
   </div>
 `;
 
+// 平台判断：macOS 上给 <body> 加 os-macos 类，仅用于切换原生红绿灯 + 工具栏右移布局。
+// 用 navigator.userAgent 判断（Tauri 桌面 webview 的 UA 在 macOS 含 "Mac"），零 Rust/权限改动，
+// 因此 Windows 永远不加该类、布局与作者原始版本完全一致。
+if (/Mac/i.test(navigator.userAgent)) document.body.classList.add("os-macos");
+
 createIcons({ icons: { CircleAlert, CircleCheck, Code2, Download, ExternalLink, Eye, FileCog, FileText, FolderOpen, Github, LoaderCircle, Minus, PackageCheck, Plus, Puzzle, RefreshCw, RotateCcw, Save, Search, Settings, SlidersHorizontal, Square, TerminalSquare, Trash2, Wrench, X } });
 const $ = <T extends HTMLElement = HTMLInputElement>(selector: string): T => document.querySelector<T>(selector)!;
 const currentWindow = getCurrentWindow();

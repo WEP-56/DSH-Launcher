@@ -35,6 +35,17 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .window-controls button { width: 44px; }
 .window-controls button.close:hover { background: #d3313d; color: #fff; }
 
+/* —— macOS：原生红绿灯在左，工具移到右侧（仅 body.os-macos，不影响 Windows） —— */
+/* 原生红黄绿按钮出现在左上，给标题栏左侧留 ~80px 避免内容压到按钮上。 */
+body.os-macos .titlebar { padding-left: 80px; padding-right: 8px; }
+/* 把工具组（管理/配置/插件/设置/新建）移到标签页右侧。 */
+body.os-macos .toolbar-left { order: 2; }
+/* 仅保留刷新按钮（“窗口控制”里的 min/max/close 由原生红绿灯接管，故隐藏）。 */
+body.os-macos .window-controls { order: 3; }
+body.os-macos #window-minimize,
+body.os-macos #window-maximize,
+body.os-macos #window-close { display: none; }
+
 /* —— 标签条：居中放在顶栏，空白处仍是窗口拖拽区 —— */
 .tab-zone { position: relative; flex: 1 1 0; min-width: 0; height: 100%; display: flex; align-items: center; justify-content: center; gap: 3px; padding: 0 8px; overflow: hidden; }
 .tab-strip { display: flex; align-items: center; gap: 3px; min-width: 0; max-width: 100%; overflow-x: auto; scrollbar-width: none; }

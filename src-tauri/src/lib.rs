@@ -17,7 +17,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     webview::DownloadEvent,
-    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, State, TitleBarStyle, WebviewUrl, WebviewWindowBuilder,
 };
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult};
 
@@ -1796,8 +1796,19 @@ fn spawn_launcher_window_named(
             .inner_size(width, height)
             .min_inner_size(620.0, 560.0)
             .resizable(true)
-            .decorations(false)
             .visible(false);
+    // macOS：启用原生装饰 + 叠加标题栏，露出标准红黄绿按钮（左侧）。
+    // Windows/Linux：保持无边框自定义标题栏（与作者原始行为完全一致）。
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .decorations(true)
+            .title_bar_style(TitleBarStyle::Overlay);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder = builder.decorations(false);
+    }
     builder = match position {
         Some((x, y)) => builder.position(x, y),
         None => builder.center(),
