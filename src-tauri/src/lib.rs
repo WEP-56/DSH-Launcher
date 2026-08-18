@@ -20,6 +20,8 @@ use tauri::{
     AppHandle, Emitter, Manager, State, TitleBarStyle, WebviewUrl, WebviewWindowBuilder,
 };
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult};
+#[cfg(target_os = "macos")]
+use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
 
 const MAX_LOG_LINES: usize = 400;
 
@@ -1642,7 +1644,12 @@ async fn remove_plugin(
 }
 
 // 标题栏的逻辑高度（px），前端 .titlebar 与这里必须一致；拖拽落点命中
-// 其他窗口的这段区域时视为“拖入标签栏”。
+// 其他窗口的这段区域时视为“拖入标签栏”。macOS 用原生 Overlay 标题栏时
+// 前端将其加高为 48px（styles.css body.os-macos .titlebar），此处按平台区分，
+// 否则 43~48px 的拖放会误判为“拖出成新窗口”。
+#[cfg(target_os = "macos")]
+const TITLEBAR_LOGICAL_HEIGHT: f64 = 48.0;
+#[cfg(not(target_os = "macos"))]
 const TITLEBAR_LOGICAL_HEIGHT: f64 = 35.0;
 const TAB_DRAG_PREVIEW_LABEL: &str = "tab-drag-preview";
 
@@ -1798,12 +1805,15 @@ fn spawn_launcher_window_named(
             .resizable(true)
             .visible(false);
     // macOS：启用原生装饰 + 叠加标题栏，露出标准红黄绿按钮（左侧）。
+    // transparent(true) 配合 macos-private-api，让标题栏下方的原生振动模糊
+    // （NSVisualEffectView）能够透出；前端把标题栏设为半透明以呈现毛玻璃。
     // Windows/Linux：保持无边框自定义标题栏（与作者原始行为完全一致）。
     #[cfg(target_os = "macos")]
     {
         builder = builder
             .decorations(true)
-            .title_bar_style(TitleBarStyle::Overlay);
+            .title_bar_style(TitleBarStyle::Overlay)
+            .transparent(true);
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1833,6 +1843,17 @@ fn spawn_launcher_window_named(
         })
         .build()
         .map_err(|error| format!("无法创建 Launcher 窗口：{error}"))?;
+    // macOS：安装原生振动模糊（HeaderView 材质），标题栏呈系统毛玻璃质感。
+    // 失败不影响功能，仅降级为纯色标题栏。
+    #[cfg(target_os = "macos")]
+    {
+        let _ = apply_vibrancy(
+            &window,
+            NSVisualEffectMaterial::HeaderView,
+            Some(NSVisualEffectState::Active),
+            None,
+        );
+    }
     reveal_window_fallback(window);
     Ok(())
 }
