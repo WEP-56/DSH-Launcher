@@ -11,8 +11,8 @@
   --border-strong: #c6cbd3;
   --text: #1e2024;
   --text-muted: #707780;
-  --accent: #246bfd;
-  --accent-hover: #1457d9;
+  --accent: #007AFF;
+  --accent-hover: #0066D6;
   --danger: #c83d47;
   --success: #15835c;
   --warning: #be7412;
@@ -24,6 +24,9 @@ body { margin: 0; min-width: 520px; background: var(--surface-muted); color: var
 button, input, textarea, select { font: inherit; letter-spacing: 0; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .45; }
+/* macOS 习惯：焦点环仅在键盘操作时出现（:focus-visible），鼠标点击不显示。 */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+:focus:not(:focus-visible) { outline: none; }
 
 .shell { width: 100%; height: 100%; overflow: hidden; }
 .titlebar { height: 35px; display: flex; align-items: center; padding-left: 3px; border-bottom: 1px solid var(--border); background: var(--surface); user-select: none; }
@@ -36,8 +39,16 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .window-controls button.close:hover { background: #d3313d; color: #fff; }
 
 /* —— macOS：原生红绿灯在左，工具移到右侧（仅 body.os-macos，不影响 Windows） —— */
+/* 用系统字体（SF Pro），贴合 macOS 原生观感。 */
+body.os-macos { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro", "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif; background: transparent; }
 /* 原生红黄绿按钮出现在左上，给标题栏左侧留 ~80px 避免内容压到按钮上。 */
-body.os-macos .titlebar { padding-left: 80px; padding-right: 8px; }
+body.os-macos .titlebar { padding-left: 80px; padding-right: 8px; height: 48px;
+  /* 半透明 + 毛玻璃，叠加在原生振动模糊（NSVisualEffectView）之上，呈系统工具栏质感。 */
+  background: color-mix(in srgb, var(--surface) 30%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  backdrop-filter: blur(20px) saturate(160%); }
+/* 更高的原生工具栏：内容区相应下移。 */
+body.os-macos .workspace-view { height: calc(100% - 48px); }
 /* 把工具组（管理/配置/插件/设置/新建）移到标签页右侧。 */
 body.os-macos .toolbar-left { order: 2; }
 /* 仅保留刷新按钮（“窗口控制”里的 min/max/close 由原生红绿灯接管，故隐藏）。 */
@@ -141,7 +152,7 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; }
 .field > label { display: block; margin-bottom: 6px; font-size: 11px; font-weight: 650; }
 input, select, textarea { outline: none; }
 input:not([type="radio"]), select { width: 100%; height: 34px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font-size: 12px; }
-input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(36, 107, 253, .12); }
+input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
 .path-input { display: flex; align-items: center; gap: 7px; }
 .path-input input { flex: 1; min-width: 0; }
 .segmented { display: inline-grid; grid-template-columns: 1fr 1fr; padding: 2px; border-radius: 5px; background: var(--surface-muted); }
@@ -246,7 +257,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
   .package-summary > div { padding: 8px 11px; }
 }
 @media (prefers-color-scheme: dark) {
-  :root { --surface: #202226; --surface-muted: #17191c; --surface-hover: #2a2d32; --border: #34373c; --border-strong: #4a4e55; --text: #f0f1f3; --text-muted: #a2a7af; }
+  :root { --surface: #202226; --surface-muted: #17191c; --surface-hover: #2a2d32; --border: #34373c; --border-strong: #4a4e55; --text: #f0f1f3; --text-muted: #a2a7af; --accent: #0A84FF; --accent-hover: #409CFF; }
   .titlebar { background: var(--surface); }
   .window-controls button.close:hover { background: #c73540; }
 }
