@@ -12,6 +12,7 @@
     "core:window:allow-close",
     "core:window:allow-show",
     "core:window:allow-set-focus",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "dialog:allow-ask"
   ]
 }

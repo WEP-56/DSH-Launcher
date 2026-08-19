@@ -214,6 +214,15 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 .plugin-item small, .search-item small { display: block; margin-top: 4px; color: var(--text-muted); font-size: 10px; }
 .search-item p { max-width: 580px; margin: 5px 0 0; color: var(--text-muted); font-size: 11px; line-height: 16px; }
 .plugin-search { display: flex; gap: 8px; margin-bottom: 8px; }
+.installed-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 7px; padding-bottom: 9px; border-bottom: 1px solid var(--border); }
+.installed-toolbar > span { flex: 1; color: var(--text-muted); font-size: 11px; }
+.installed-toolbar .button { min-height: 28px; font-size: 11px; }
+.plugin-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.plugin-badge { display: inline-block; margin-left: 8px; padding: 1px 7px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-muted); font-size: 9.5px; line-height: 14px; vertical-align: 1px; white-space: nowrap; }
+.plugin-badge.update { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); }
+.plugin-badge.ok { border-color: color-mix(in srgb, var(--success) 40%, var(--border)); color: var(--success); }
+/* 插件操作进行中：屏蔽会触发第二个操作的入口，防止并发停启服务。 */
+.plugin-panel.busy .plugin-actions button, .plugin-panel.busy #install-plugin, .plugin-panel.busy .search-install, .plugin-panel.busy .market-install, .plugin-panel.busy #update-all-plugins, .plugin-panel.busy #check-plugin-updates { pointer-events: none; opacity: .5; }
 .loading, .empty-state { display: grid; place-items: center; gap: 7px; min-height: 130px; color: var(--text-muted); font-size: 12px; text-align: center; }
 .loading svg { width: 18px; height: 18px; animation: spin 1s linear infinite; }
 .empty-state svg { width: 22px; height: 22px; }

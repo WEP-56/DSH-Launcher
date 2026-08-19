@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import whaleIconUrl from "../assets/dsh-icon-source.png";
 import {
   CircleAlert,
@@ -65,6 +65,7 @@ interface LauncherStatus {
   pid: number | null;
   external: boolean;
   logs: string[];
+  busy: string | null;
 }
 
 interface TabState {
@@ -102,7 +103,8 @@ interface ConfigFileInfo {
   editable: boolean;
 }
 
-interface InstalledPlugin { name: string; version: string; bundle: boolean; }
+interface InstalledPlugin { name: string; version: string; bundle: boolean; installed_version: string; channel: string; update_spec: string; }
+interface PluginUpdateInfo { name: string; channel: string; installed_version: string; latest_version: string; update_available: boolean; detail: string; }
 interface PluginSearchResult { name: string; version: string; description: string; homepage: string; npm_url: string; keywords: string[]; }
 interface OperationResult { success: boolean; output: string; }
 interface MarketMeta { id: string; label: string; color?: string | null; }
@@ -244,7 +246,7 @@ createIcons({ icons: { CircleAlert, CircleCheck, Code2, Download, ExternalLink, 
 const $ = <T extends HTMLElement = HTMLInputElement>(selector: string): T => document.querySelector<T>(selector)!;
 const currentWindow = getCurrentWindow();
 let config: LauncherConfig;
-let status: LauncherStatus = { phase: "stopped", message: "dsh 尚未启动", url: "http://127.0.0.1:3080", pid: null, external: false, logs: [] };
+let status: LauncherStatus = { phase: "stopped", message: "dsh 尚未启动", url: "http://127.0.0.1:3080", pid: null, external: false, logs: [], busy: null };
 let configFiles: ConfigFileInfo[] = [];
 let toastTimer: number | undefined;
 let tabs: TabState[] = [];
@@ -252,6 +254,12 @@ let activeTab = 0;
 let tabSequence = 0;
 let tabNameSequence = 0;
 let market: MarketCatalog | null = null;
+let installedPlugins: InstalledPlugin[] = [];
+// 上次“检查更新”的结果，按插件名索引；卸载/更新成功后按名清除对应条目。
+let pluginUpdates = new Map<string, PluginUpdateInfo>();
+// 插件安装/卸载/更新共用的防重入标记：这些操作会停启服务并改写同一份
+// profile，绝不能并发触发（后端另有互斥锁兜底，这里避免把请求排进队列）。
+let pluginBusy = false;
 const marketCategoryMeta: MarketMeta[] = [
   { id: "ui", label: "界面增强", color: "#a0c3ec" },
   { id: "agent-session", label: "Agent 与会话", color: "#c4b5fd" },
@@ -623,23 +631,27 @@ function renderStatus(next: LauncherStatus): void {
   const wasReady = status.phase === "ready";
   status = next;
   const externalReady = next.phase === "ready" && next.external;
-  $("#service-state").textContent = next.phase === "ready" ? (next.external ? "运行中（外部）" : "运行中") : next.phase === "starting" ? "启动中" : next.phase === "failed" ? "启动失败" : "已停止";
+  // 互斥操作（插件安装/卸载/更新、dsh 更新）进行中：服务已被操作方停下并会
+  // 自动恢复，启动/重启入口全部禁用（后端同样会拒绝，这里是可见的防呆）。
+  const maintenance = Boolean(next.busy) && next.phase !== "ready";
+  $("#service-state").textContent = next.phase === "ready" ? (next.external ? "运行中（外部）" : "运行中") : maintenance ? "维护中" : next.phase === "starting" ? "启动中" : next.phase === "failed" ? "启动失败" : "已停止";
   const state = $("#workspace-state");
   state.dataset.phase = next.phase;
-  $("#workspace-title").textContent = next.phase === "failed" ? "dsh 启动失败" : next.phase === "starting" ? "正在启动 dsh" : "dsh 尚未运行";
-  $("#workspace-message").textContent = next.message;
+  $("#workspace-title").textContent = maintenance ? (next.busy ?? "操作进行中") : next.phase === "failed" ? "dsh 启动失败" : next.phase === "starting" ? "正在启动 dsh" : "dsh 尚未运行";
+  $("#workspace-message").textContent = maintenance ? "操作完成后会自动恢复服务，请稍候。" : next.message;
   const startButton = $<HTMLButtonElement>("#workspace-start");
-  startButton.toggleAttribute("disabled", next.phase === "starting" || next.phase === "stopping");
-  const actionLabel = next.phase === "failed" ? "重启 dsh" : next.phase === "starting" ? "正在连接 dsh" : "启动 dsh";
+  startButton.toggleAttribute("disabled", maintenance || next.phase === "starting" || next.phase === "stopping");
+  const actionLabel = maintenance ? (next.busy ?? "操作进行中") : next.phase === "failed" ? "重启 dsh" : next.phase === "starting" ? "正在连接 dsh" : "启动 dsh";
   startButton.title = actionLabel;
   startButton.ariaLabel = actionLabel;
   // 外部启动的服务不归 Launcher 管：停止/重启在这里没有意义，禁用并说明。
   const restartButton = $<HTMLButtonElement>("#manage-restart");
   const stopButton = $<HTMLButtonElement>("#manage-stop");
-  restartButton.toggleAttribute("disabled", next.phase === "starting" || next.phase === "stopping" || externalReady);
-  stopButton.toggleAttribute("disabled", next.phase === "stopped" || next.phase === "stopping" || externalReady);
-  restartButton.title = externalReady ? "服务由外部启动，Launcher 无法重启" : "重启服务";
-  stopButton.title = externalReady ? "服务由外部启动，Launcher 无法停止" : "停止服务";
+  const opsBusy = Boolean(next.busy);
+  restartButton.toggleAttribute("disabled", opsBusy || next.phase === "starting" || next.phase === "stopping" || externalReady);
+  stopButton.toggleAttribute("disabled", opsBusy || next.phase === "stopped" || next.phase === "stopping" || externalReady);
+  restartButton.title = externalReady ? "服务由外部启动，Launcher 无法重启" : opsBusy ? "插件/更新操作进行中，完成后自动恢复" : "重启服务";
+  stopButton.title = externalReady ? "服务由外部启动，Launcher 无法停止" : opsBusy ? "插件/更新操作进行中，完成后自动恢复" : "停止服务";
   // 进入就绪的瞬间把所有标签标记为待重载：服务可能重启过或换了端口，旧
   // iframe 内容已失效；后台标签等到被激活时再各自重载。
   if (next.phase === "ready" && !wasReady) tabs.forEach((tab) => { tab.stale = true; });
@@ -735,30 +747,116 @@ async function loadInstalledPlugins(): Promise<void> {
   node.innerHTML = `<div class="loading"><i data-lucide="loader-circle"></i>正在读取 profile</div>`;
   createIcons({ icons: { LoaderCircle } });
   try {
-    const plugins = await invoke<InstalledPlugin[]>("list_plugins");
-    node.innerHTML = plugins.length ? plugins.map((plugin) => `<article class="plugin-item"><div><strong>${escapeHtml(plugin.name)}</strong><small>${escapeHtml(plugin.version)}${plugin.bundle ? " · bundle" : ""}</small></div><button class="icon-button danger remove-plugin" data-spec="${escapeAttr(plugin.name)}" title="卸载"><i data-lucide="trash-2"></i></button></article>`).join("") : `<div class="empty-state"><i data-lucide="puzzle"></i><p>Web profile 暂无额外插件</p><small>从插件商店选择一个 GitHub 项目开始。</small></div>`;
-    createIcons({ icons: { Puzzle, Trash2 } });
-    node.querySelectorAll<HTMLButtonElement>(".remove-plugin").forEach((button) => button.addEventListener("click", () => void removePlugin(button.dataset.spec ?? "")));
+    installedPlugins = await invoke<InstalledPlugin[]>("list_plugins");
+    renderInstalledPlugins();
   } catch (error) { node.textContent = String(error); }
+}
+const PLUGIN_CHANNEL_LABELS: Record<string, string> = { npm: "npm", github: "GitHub", git: "Git", local: "本地", alias: "npm 别名" };
+function installedPluginCard(plugin: InstalledPlugin): string {
+  const update = pluginUpdates.get(plugin.name);
+  const badge = !update ? "" : update.update_available
+    ? `<span class="plugin-badge update" title="${escapeAttr(update.detail)}">可更新 ${escapeHtml(update.latest_version)}</span>`
+    : update.latest_version
+      ? `<span class="plugin-badge ok" title="${escapeAttr(update.detail)}">已是最新</span>`
+      : `<span class="plugin-badge" title="${escapeAttr(update.detail)}">无法检测</span>`;
+  const meta = [
+    plugin.version,
+    plugin.installed_version && plugin.installed_version !== plugin.version ? `当前 ${plugin.installed_version}` : "",
+    PLUGIN_CHANNEL_LABELS[plugin.channel] ?? plugin.channel,
+    plugin.bundle ? "bundle" : "",
+  ].filter(Boolean).map((part) => escapeHtml(part)).join(" · ");
+  const updateTitle = plugin.channel === "npm" ? "更新到最新版本" : "更新（重新解析来源并安装最新内容）";
+  const updateButton = plugin.update_spec
+    ? `<button class="icon-button update-plugin" data-name="${escapeAttr(plugin.name)}" data-spec="${escapeAttr(plugin.update_spec)}" title="${updateTitle}"><i data-lucide="refresh-cw"></i></button>`
+    : "";
+  return `<article class="plugin-item"><div><strong>${escapeHtml(plugin.name)}</strong>${badge}<small>${meta}</small></div><div class="plugin-actions">${updateButton}<button class="icon-button danger remove-plugin" data-spec="${escapeAttr(plugin.name)}" title="卸载"><i data-lucide="trash-2"></i></button></div></article>`;
+}
+function renderInstalledPlugins(): void {
+  const node = $("#installed-plugins");
+  if (!installedPlugins.length) {
+    node.innerHTML = `<div class="empty-state"><i data-lucide="puzzle"></i><p>Web profile 暂无额外插件</p><small>从插件商店选择一个 GitHub 项目开始。</small></div>`;
+    createIcons({ icons: { Puzzle } });
+    return;
+  }
+  const updatable = installedPlugins.filter((plugin) => plugin.update_spec && pluginUpdates.get(plugin.name)?.update_available);
+  const updateAll = updatable.length
+    ? `<button id="update-all-plugins" class="button primary"><i data-lucide="download"></i><span>全部更新（${updatable.length}）</span></button>`
+    : "";
+  node.innerHTML = `<div class="installed-toolbar"><span>${installedPlugins.length} 个插件</span>${updateAll}<button id="check-plugin-updates" class="button quiet"><i data-lucide="refresh-cw"></i><span>检查更新</span></button></div>${installedPlugins.map(installedPluginCard).join("")}`;
+  createIcons({ icons: { Download, RefreshCw, Trash2 } });
+  node.querySelectorAll<HTMLButtonElement>(".remove-plugin").forEach((button) => button.addEventListener("click", () => void removePlugin(button.dataset.spec ?? "")));
+  node.querySelectorAll<HTMLButtonElement>(".update-plugin").forEach((button) =>
+    button.addEventListener("click", () => void updatePlugins([{ name: button.dataset.name ?? "", spec: button.dataset.spec ?? "" }])));
+  node.querySelector<HTMLButtonElement>("#check-plugin-updates")?.addEventListener("click", () => void checkPluginUpdates());
+  node.querySelector<HTMLButtonElement>("#update-all-plugins")?.addEventListener("click", () =>
+    void updatePlugins(updatable.map((plugin) => ({ name: plugin.name, spec: plugin.update_spec }))));
+}
+async function checkPluginUpdates(): Promise<void> {
+  const button = document.querySelector<HTMLButtonElement>("#check-plugin-updates");
+  if (button) { button.disabled = true; const label = button.querySelector("span"); if (label) label.textContent = "检查中…"; }
+  try {
+    const infos = await invoke<PluginUpdateInfo[]>("check_plugin_updates");
+    pluginUpdates = new Map(infos.map((info) => [info.name, info]));
+    const count = infos.filter((info) => info.update_available).length;
+    const failed = infos.filter((info) => info.detail.startsWith("检查失败")).length;
+    toast(count ? `发现 ${count} 个插件可更新` : failed ? `未发现可更新的插件（${failed} 个检查失败，可悬停徽标查看原因）` : "所有插件均为已知最新版本");
+  } catch (error) { toast(String(error), true); }
+  // 重绘会重建工具栏按钮，顺带恢复“检查更新”的可用状态。
+  renderInstalledPlugins();
+}
+// 串行化插件操作：并发的安装/卸载/更新会互相踩踏 profile 和服务停启。
+async function withPluginOps(run: () => Promise<void>): Promise<void> {
+  if (pluginBusy) { toast("已有插件操作正在进行，请等它完成后再试", true); return; }
+  pluginBusy = true;
+  document.querySelector(".plugin-panel")?.classList.add("busy");
+  try { await run(); } finally {
+    pluginBusy = false;
+    document.querySelector(".plugin-panel")?.classList.remove("busy");
+  }
 }
 async function installPlugin(spec = $("#plugin-spec").value.trim()): Promise<void> {
   if (!spec) { toast("请输入 npm 包名或 github:owner/repository", true); return; }
-  const output = $("#plugin-output"); output.hidden = false; output.textContent = `正在安装 ${spec}…`;
-  try {
-    const result = await invoke<OperationResult>("install_plugin", { spec });
-    output.textContent = result.output || (result.success ? "安装完成" : "安装失败");
-    toast(result.success ? (status.external ? "插件安装完成（当前沿用外部服务，需自行重启该服务生效）" : "插件安装完成，服务已重新启动") : "插件安装失败", !result.success);
-    if (result.success) { $("#plugin-spec").value = ""; await loadInstalledPlugins(); }
-  } catch (error) { output.textContent = String(error); toast(String(error), true); }
+  await withPluginOps(async () => {
+    const output = $("#plugin-output"); output.hidden = false; output.textContent = `正在安装 ${spec}…`;
+    try {
+      const result = await invoke<OperationResult>("install_plugin", { spec });
+      output.textContent = result.output || (result.success ? "安装完成" : "安装失败");
+      toast(result.success ? (status.external ? "插件安装完成（当前沿用外部服务，需自行重启该服务生效）" : "插件安装完成，服务已重新启动") : "插件安装失败", !result.success);
+      if (result.success) { $("#plugin-spec").value = ""; await loadInstalledPlugins(); }
+    } catch (error) { output.textContent = String(error); toast(String(error), true); }
+  });
 }
 async function removePlugin(spec: string): Promise<void> {
-  const output = $("#plugin-output"); output.hidden = false; output.textContent = `正在卸载 ${spec}…`;
-  try {
-    const result = await invoke<OperationResult>("remove_plugin", { spec });
-    output.textContent = result.output || (result.success ? "卸载完成" : "卸载失败");
-    toast(result.success ? (status.external ? "插件已卸载（当前沿用外部服务，需自行重启该服务生效）" : "插件已卸载，服务已重新启动") : "插件卸载失败", !result.success);
-    if (result.success) await loadInstalledPlugins();
-  } catch (error) { output.textContent = String(error); toast(String(error), true); }
+  if (!spec) return;
+  const question = `确定卸载插件 ${spec} 吗？`;
+  const confirmed = await ask(question, { title: "DSH Launcher", kind: "warning" }).catch(() => window.confirm(question));
+  if (!confirmed) return;
+  await withPluginOps(async () => {
+    const output = $("#plugin-output"); output.hidden = false; output.textContent = `正在卸载 ${spec}…`;
+    try {
+      const result = await invoke<OperationResult>("remove_plugin", { spec });
+      output.textContent = result.output || (result.success ? "卸载完成" : "卸载失败");
+      toast(result.success ? (status.external ? "插件已卸载（当前沿用外部服务，需自行重启该服务生效）" : "插件已卸载，服务已重新启动") : "插件卸载失败", !result.success);
+      if (result.success) { pluginUpdates.delete(spec); await loadInstalledPlugins(); }
+    } catch (error) { output.textContent = String(error); toast(String(error), true); }
+  });
+}
+async function updatePlugins(targets: { name: string; spec: string }[]): Promise<void> {
+  const valid = targets.filter((target) => target.spec);
+  if (!valid.length) return;
+  await withPluginOps(async () => {
+    const label = valid.length === 1 ? valid[0].name : `${valid.length} 个插件`;
+    const output = $("#plugin-output"); output.hidden = false; output.textContent = `正在更新 ${label}…`;
+    try {
+      const result = await invoke<OperationResult>("update_plugins", { specs: valid.map((target) => target.spec) });
+      output.textContent = result.output || (result.success ? "更新完成" : "更新失败");
+      toast(result.success ? (status.external ? `${label} 已更新（当前沿用外部服务，需自行重启该服务生效）` : `${label} 已更新，服务已重新启动`) : "插件更新失败，详见输出", !result.success);
+      if (result.success) {
+        valid.forEach((target) => pluginUpdates.delete(target.name));
+        await loadInstalledPlugins();
+      }
+    } catch (error) { output.textContent = String(error); toast(String(error), true); }
+  });
 }
 async function searchPlugins(): Promise<void> {
   const node = $("#plugin-search-results"); node.innerHTML = `<div class="loading">正在查询 npm…</div>`;
@@ -1042,6 +1140,7 @@ async function init(): Promise<void> {
   renderStatus(loadedStatus);
   await revealWindow();
   if (currentWindow.label === "control" && config.auto_check_updates) void checkLauncherUpdate(false);
-  if (config.auto_start && loadedStatus.phase === "stopped") await runAction("start_dsh");
+  // 有互斥操作在进行时不自动启动：操作方会在结束后自行恢复服务。
+  if (config.auto_start && loadedStatus.phase === "stopped" && !loadedStatus.busy) await runAction("start_dsh");
 }
 void init().catch((error) => { void revealWindow(); toast(String(error), true); });
