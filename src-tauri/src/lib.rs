@@ -1644,12 +1644,10 @@ async fn remove_plugin(
 }
 
 // 标题栏的逻辑高度（px），前端 .titlebar 与这里必须一致；拖拽落点命中
-// 其他窗口的这段区域时视为“拖入标签栏”。macOS 用原生 Overlay 标题栏时
-// 前端将其加高为 48px（styles.css body.os-macos .titlebar），此处按平台区分，
-// 否则 43~48px 的拖放会误判为“拖出成新窗口”。
-#[cfg(target_os = "macos")]
-const TITLEBAR_LOGICAL_HEIGHT: f64 = 48.0;
-#[cfg(not(target_os = "macos"))]
+// 其他窗口的这段区域时视为“拖入标签栏”。macOS 用原生 Overlay 标题栏、
+// 前端 .titlebar 保持 35px（与 Windows/Linux 一致，Overlay 由红绿灯所在
+// 系统栏提供，前端无需加高），各平台统一为 35px，否则 43~48px 的拖放会
+// 误判为“拖出成新窗口”。
 const TITLEBAR_LOGICAL_HEIGHT: f64 = 35.0;
 const TAB_DRAG_PREVIEW_LABEL: &str = "tab-drag-preview";
 
@@ -1813,7 +1811,11 @@ fn spawn_launcher_window_named(
         builder = builder
             .decorations(true)
             .title_bar_style(TitleBarStyle::Overlay)
-            .transparent(true);
+            .transparent(true)
+            // Overlay 模式下系统会在红绿灯右侧绘制原生标题文字；清空标题
+            // 只保留红绿灯，避免“DSH Launcher”文字与前端居中的标签区在
+            // 小窗口下交叠。窗口标题由 Dock/App 菜单提供，无需在此显示。
+            .title("");
     }
     #[cfg(not(target_os = "macos"))]
     {
