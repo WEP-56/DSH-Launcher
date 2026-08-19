@@ -421,17 +421,27 @@ function syncFrames(): void {
         frame.title = "DeepSeek Harness WebUI";
         frame.setAttribute("allow", "clipboard-read; clipboard-write");
         $("#workspace-view").appendChild(frame);
+        // 新 iframe 从空白装载 WebUI 的过程会产生白屏，先隐藏，
+        // 首次 load 完成后才揭晓（后续 src 重载复用同一监听）。
+        frame.hidden = true;
+        frame.addEventListener("load", () => {
+          if (tab.id === activeTab) frame.hidden = false;
+        });
         tab.frame = frame;
       }
       // 只在地址变化或被标记过期时装载。iframe.src 的 getter 会把地址规范化
       // （补上尾部斜杠），与 status.url 直接比较永远不相等，因此自己记录
       // loadedUrl，避免每条状态事件（包括日志推送）都触发一次 WebUI 重载。
       if (tab.loadedUrl !== status.url || tab.stale) {
+        // 重载期间先隐藏、load 后揭晓，避免空白闪烁。
+        tab.frame.hidden = true;
         tab.frame.src = status.url;
         tab.loadedUrl = status.url;
         tab.stale = false;
+      } else {
+        // 已加载完成的标签直接显示（切换回来不应闪屏）。
+        tab.frame.hidden = false;
       }
-      tab.frame.hidden = false;
     } else if (tab.frame) {
       tab.frame.hidden = true;
     }
