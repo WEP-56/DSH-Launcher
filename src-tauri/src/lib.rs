@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
+    ffi::{OsStr, OsString},
     fs,
     io::{BufRead, BufReader, Read},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
@@ -443,6 +444,77 @@ fn adopt_login_shell_path() {
             }
         }
     }
+
+    // 登录 shell 用 `-l` 启动时只读 .zprofile；nvm/pnpm 等通常把 PATH 写在
+    // .zshrc（交互 shell 才读），因此上面的探测拿不到这些目录。再按已知的
+    // node/npm 生态安装位置补齐，保证 GUI 进程能找到 `npm install -g
+    // @deepseek-ai/dsh` 生成的 dsh、以及 npx/npm 本身。
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let merged = merge_existing_path_dirs(
+            known_path_dirs(&home),
+            &std::env::var_os("PATH").unwrap_or_default(),
+        );
+        std::env::set_var("PATH", merged);
+    }
+}
+
+/// 收集 macOS 上 node/npm 生态常见的可执行目录（含 nvm 各版本 bin），
+/// 越新的 nvm 版本越靠前。只返回候选目录，是否真实存在由合并方过滤。
+#[cfg(target_os = "macos")]
+fn known_path_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let home = home.to_path_buf();
+    dirs.push(home.join(".npm-global").join("bin"));
+    // npm prefix 直接指向 $HOME 时，全局命令在 $HOME/node_modules/.bin。
+    dirs.push(home.join("node_modules").join(".bin"));
+    if let Ok(entries) = fs::read_dir(home.join(".nvm").join("versions").join("node")) {
+        let mut versions: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        versions.sort_by(|a, b| version_key(a).cmp(&version_key(b)).reverse());
+        for version in versions {
+            let bin = version.join("bin");
+            if bin.is_dir() {
+                dirs.push(bin);
+            }
+        }
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs.push(PathBuf::from("/opt/homebrew/opt/node@24/bin"));
+    dirs.push(PathBuf::from("/opt/homebrew/opt/node@22/bin"));
+    dirs.push(PathBuf::from("/opt/homebrew/opt/node@20/bin"));
+    dirs.push(PathBuf::from("/opt/homebrew/opt/node@18/bin"));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    dirs.push(PathBuf::from("/opt/local/bin")); // MacPorts
+    dirs
+}
+
+/// 解析 nvm 版本目录名（去掉前导 v）为可比较的 (major, minor, patch)。
+#[cfg(target_os = "macos")]
+fn version_key(path: &Path) -> (u64, u64, u64) {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .trim_start_matches('v');
+    let mut parts = name.split('.');
+    let parse = |part: Option<&str>| part.and_then(|value| value.parse().ok()).unwrap_or(0);
+    (
+        parse(parts.next()),
+        parse(parts.next()),
+        parse(parts.next()),
+    )
+}
+
+/// 把存在且尚未出现的候选目录追加到当前 PATH，返回合并结果（不覆盖原有值）。
+#[cfg(target_os = "macos")]
+fn merge_existing_path_dirs(dirs: Vec<PathBuf>, current: &OsStr) -> OsString {
+    use std::env::{join_paths, split_paths};
+    let mut parts: Vec<PathBuf> = split_paths(current).collect();
+    for dir in dirs {
+        if dir.is_dir() && !parts.contains(&dir) {
+            parts.push(dir);
+        }
+    }
+    join_paths(&parts).unwrap_or_else(|_| current.to_os_string())
 }
 
 #[cfg(windows)]
@@ -2313,5 +2385,88 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(!output.stdout.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn collects_nvm_bins_under_home_newest_first() {
+        let base = std::env::temp_dir().join(format!("dsh-home-{}", std::process::id()));
+        let older = base.join(".nvm").join("versions").join("node").join("v22.0.0").join("bin");
+        let newer = base.join(".nvm").join("versions").join("node").join("v24.1.0").join("bin");
+        let home_bin = base.join("node_modules").join(".bin");
+        fs::create_dir_all(&older).expect("create fake older nvm bin");
+        fs::create_dir_all(&newer).expect("create fake newer nvm bin");
+        fs::create_dir_all(&home_bin).expect("create fake home bin");
+        let dirs = known_path_dirs(&base);
+        let idx_older = dirs
+            .iter()
+            .position(|dir| dir == &older)
+            .expect("older nvm bin should be listed");
+        let idx_newer = dirs
+            .iter()
+            .position(|dir| dir == &newer)
+            .expect("newer nvm bin should be listed");
+        assert!(idx_newer < idx_older, "newest nvm version should come first");
+        assert!(
+            dirs.contains(&home_bin),
+            "npm prefix at HOME should be listed"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn merges_existing_dirs_without_duplicating_current_path() {
+        let base = std::env::temp_dir().join(format!("dsh-path-{}", std::process::id()));
+        let a = base.join("a");
+        let b = base.join("b");
+        let missing = base.join("missing");
+        fs::create_dir_all(&a).expect("create dir a");
+        fs::create_dir_all(&b).expect("create dir b");
+        let current = std::env::join_paths([&a, &b]).expect("join current path");
+        // 已存在的 a、b 不再追加；不存在的目录被过滤。
+        let merged = merge_existing_path_dirs(vec![a.clone(), b.clone(), missing.clone()], &current);
+        assert_eq!(merged, current, "existing dirs must not be duplicated");
+        // 新出现且存在的目录被追加。
+        let c = base.join("c");
+        fs::create_dir_all(&c).expect("create dir c");
+        let merged = merge_existing_path_dirs(vec![a, c.clone()], &current);
+        let parts: Vec<PathBuf> = std::env::split_paths(&merged).collect();
+        assert!(
+            parts.contains(&c),
+            "new dir should be appended"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "host-specific: asserts the real login machine layout"]
+    fn host_path_covers_dsh_and_node() {
+        // 把附加的候选目录并入 PATH 后，dsh（Node shim）与 node 都必须在 PATH
+        // 里可解析，否则 GUI 进程直接 spawn("dsh") 会 ENOENT。
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let merged = merge_existing_path_dirs(
+                known_path_dirs(&home),
+                // 模拟 launchd 给 GUI 进程的极简 PATH（进程现场实测值）。
+                OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin"),
+            );
+            std::env::set_var("PATH", &merged);
+            for name in ["dsh", "node"] {
+                let output = Command::new("sh")
+                    .args(["-c", &format!("command -v {name}")])
+                    .output()
+                    .expect("sh should run");
+                assert!(
+                    output.status.success(),
+                    "{name} not resolvable via merged PATH: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                eprintln!(
+                    "resolved {name}: {}",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                );
+            }
+        }
     }
 }
