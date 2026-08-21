@@ -16,7 +16,16 @@ use crate::{
     util::truncate_chars,
 };
 
-fn command_for_config(config: &LauncherConfig) -> Result<Command, String> {
+/// `dsh web` 的命令行参数。抽出来是为了能在测试里检查参数拼装，
+/// 不必真的去执行 dsh。
+///
+/// 这里刻意不传 `--no-open`（dsh web 默认会额外弹一个系统浏览器窗口，对
+/// 内嵌页面的 Launcher 是多余的）：该开关是 `@deepseek-ai/dsh-web-app`
+/// 0.1.0-rc.8 才加的，rc.7 及更早的 startup.js 里没有，而 dsh 的 commander
+/// 没开 allowUnknownOption —— 对还没升级的用户传过去会让 dsh 直接以
+/// “unknown option” 退出，等于把“多一个浏览器窗口”换成“根本起不来”。
+/// 等 dsh 的正式版普及后再加。
+fn web_args(config: &LauncherConfig) -> Vec<String> {
     let mut args = vec![
         "web".to_string(),
         "--host".to_string(),
@@ -27,7 +36,11 @@ fn command_for_config(config: &LauncherConfig) -> Result<Command, String> {
     for host in &config.trusted_hosts {
         args.extend(["--trusted-host".to_string(), host.clone()]);
     }
-    command_for_invocation(config, &args)
+    args
+}
+
+fn command_for_config(config: &LauncherConfig) -> Result<Command, String> {
+    command_for_invocation(config, &web_args(config))
 }
 
 fn wait_for_port_free(port: u16) -> bool {
@@ -228,6 +241,45 @@ pub fn start_process(app: AppHandle, state: AppState) -> Result<LauncherStatus, 
     current_status(state)
 }
 
+/// 一直有输出但始终不监听端口时的总时长上限。升级后首次启动要现装
+/// `~/.dsh/profiles/web` 的依赖，慢是正常的，但不能无限等下去。
+const STARTUP_HARD_LIMIT: Duration = Duration::from_secs(900);
+
+/// 启动超过这么久还没就绪就把“可能在装依赖”的提示写进状态栏。
+const SLOW_START_HINT_AFTER: Duration = Duration::from_secs(45);
+
+/// 启动守护对当前等待状态的判断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupWait {
+    /// 还在合理范围内，继续等。
+    Keep,
+    /// 太久没有任何输出，判为卡死。
+    Silent,
+    /// 一直在输出却始终不监听端口，超过总时长上限。
+    Exhausted,
+}
+
+/// 用“静默了多久”而不是“总共等了多久”判断启动是否卡死。
+///
+/// dsh 发生破坏性升级（如 0.1.0-rc.8）后首次 `dsh web` 会现装 profile 依赖，
+/// 好几分钟不监听端口但一直在刷安装日志；按固定 60 秒总时长判超时会把它
+/// 强杀掉，还可能留下半装好的 profile，导致之后每次启动都失败 —— 这就是
+/// issue #5 里“手动更新后貌似也无法启动了”。只要还有新输出就不算卡死，
+/// 另用 STARTUP_HARD_LIMIT 兜底。
+fn classify_startup_wait(
+    silent_for: Duration,
+    elapsed: Duration,
+    silence_budget: Duration,
+) -> StartupWait {
+    if silent_for > silence_budget {
+        StartupWait::Silent
+    } else if elapsed > STARTUP_HARD_LIMIT {
+        StartupWait::Exhausted
+    } else {
+        StartupWait::Keep
+    }
+}
+
 fn monitor_process(
     app: AppHandle,
     state: AppState,
@@ -238,6 +290,11 @@ fn monitor_process(
     let started = Instant::now();
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let mut ready = false;
+    // 最近一次看到子进程有新输出的时刻，以及当时的输出行数。
+    let mut last_active = Instant::now();
+    let mut seen_ticks = 0u64;
+    // “还在装依赖”的提示只播一次。
+    let mut hinted = false;
     loop {
         thread::sleep(Duration::from_millis(if ready { 800 } else { 250 }));
         let exited = {
@@ -247,6 +304,10 @@ fn monitor_process(
             };
             if runtime.generation != generation {
                 return;
+            }
+            if runtime.log_ticks != seen_ticks {
+                seen_ticks = runtime.log_ticks;
+                last_active = Instant::now();
             }
             match runtime
                 .child
@@ -303,7 +364,27 @@ fn monitor_process(
             ready = true;
             continue;
         }
-        if started.elapsed() > startup_timeout {
+        let verdict =
+            classify_startup_wait(last_active.elapsed(), started.elapsed(), startup_timeout);
+        if verdict == StartupWait::Keep {
+            // 起得慢又还在刷日志时告诉用户在等什么，否则界面只写“等待响应”，
+            // 用户会以为卡死了（升级后首次启动装依赖要好几分钟）。
+            if !hinted && started.elapsed() > SLOW_START_HINT_AFTER {
+                hinted = true;
+                if let Ok(mut runtime) = state.runtime.lock() {
+                    if runtime.generation != generation || runtime.phase != Phase::Starting {
+                        return;
+                    }
+                    runtime.message = format!(
+                        "dsh 仍在启动，还在输出日志（升级后首次启动要现装依赖，可能要几分钟）：等待 {} 响应…",
+                        runtime.url
+                    );
+                }
+                emit_status(&app, &state);
+            }
+            continue;
+        }
+        {
             // 超时后必须终止子进程；否则它继续占着端口，下次启动会把它的
             // Child 悄悄丢掉，留下一个失控的孤儿进程。
             let child = {
@@ -315,10 +396,16 @@ fn monitor_process(
                     return;
                 }
                 runtime.phase = Phase::Failed;
-                runtime.message = format!(
-                    "dsh 启动超时（{} 秒内未监听端口 {port}），已终止进程，请检查运行日志",
-                    startup_timeout.as_secs()
-                );
+                runtime.message = match verdict {
+                    StartupWait::Silent => format!(
+                        "dsh 启动超时（{} 秒内既没有监听端口 {port}，也没有任何新输出），已终止进程，请检查运行日志",
+                        startup_timeout.as_secs()
+                    ),
+                    _ => format!(
+                        "dsh 启动超过 {} 分钟仍未监听端口 {port}，已终止进程，请检查运行日志",
+                        STARTUP_HARD_LIMIT.as_secs() / 60
+                    ),
+                };
                 runtime.pid = None;
                 runtime.child.take()
             };
@@ -462,5 +549,62 @@ mod tests {
         });
         assert!(!http_service_alive(port));
         let _ = server.join();
+    }
+
+    #[test]
+    fn keeps_waiting_while_dsh_is_still_logging() {
+        let budget = Duration::from_secs(60);
+        // 升级后首次启动：五分钟没监听端口，但一直有新输出 —— 不能判超时。
+        assert_eq!(
+            classify_startup_wait(Duration::from_secs(3), Duration::from_secs(300), budget),
+            StartupWait::Keep
+        );
+    }
+
+    #[test]
+    fn fails_when_dsh_goes_quiet_without_listening() {
+        let budget = Duration::from_secs(60);
+        assert_eq!(
+            classify_startup_wait(Duration::from_secs(61), Duration::from_secs(61), budget),
+            StartupWait::Silent
+        );
+    }
+
+    #[test]
+    fn stops_waiting_after_the_hard_limit_even_if_still_logging() {
+        let budget = Duration::from_secs(60);
+        assert_eq!(
+            classify_startup_wait(
+                Duration::from_secs(1),
+                STARTUP_HARD_LIMIT + Duration::from_secs(1),
+                budget
+            ),
+            StartupWait::Exhausted
+        );
+    }
+
+    #[test]
+    fn builds_web_args_that_older_dsh_versions_still_accept() {
+        // 只检查参数拼装，不真正执行 dsh。
+        let config = LauncherConfig {
+            port: 3081,
+            trusted_hosts: vec!["example.test".into()],
+            ..Default::default()
+        };
+        let args = web_args(&config);
+        assert_eq!(
+            args,
+            vec![
+                "web",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "3081",
+                "--trusted-host",
+                "example.test",
+            ]
+        );
+        // rc.7 及更早的 dsh 不认这个开关，传了会直接以 unknown option 退出。
+        assert!(!args.contains(&"--no-open".to_string()));
     }
 }

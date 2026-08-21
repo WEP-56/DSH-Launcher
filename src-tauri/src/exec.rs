@@ -250,9 +250,18 @@ where
     })
 }
 
-/// 运行命令并收集输出。超时后终止整棵进程树并返回失败结果，
+/// 一次命令执行的原始结果。stdout/stderr 分开保留，需要解析结构化输出
+/// （例如 `npm view --json`）的调用方不会被 npm 的提示信息干扰。
+pub struct CommandCapture {
+    pub success: bool,
+    pub timed_out: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// 运行命令并分别收集 stdout/stderr。超时后终止整棵进程树，
 /// 避免挂死的 npm/dsh 把调用方（以及被暂停的 Web 服务）永远卡住。
-pub fn execute_command(mut command: Command, timeout: Duration) -> Result<OperationResult, String> {
+pub fn run_capture(mut command: Command, timeout: Duration) -> Result<CommandCapture, String> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -278,14 +287,23 @@ pub fn execute_command(mut command: Command, timeout: Duration) -> Result<Operat
         kill_child_tree(child);
     }
     // 进程结束（或被终止）后管道关闭，读取线程随之结束。
-    let stdout = stdout.join().unwrap_or_default();
-    let stderr = stderr.join().unwrap_or_default();
-    let mut combined = [stdout.trim(), stderr.trim()]
+    Ok(CommandCapture {
+        success: status.is_some_and(|status| status.success()),
+        timed_out,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
+/// 运行命令并把 stdout/stderr 合成一段给界面看的文本。
+pub fn execute_command(command: Command, timeout: Duration) -> Result<OperationResult, String> {
+    let capture = run_capture(command, timeout)?;
+    let mut combined = [capture.stdout.trim(), capture.stderr.trim()]
         .into_iter()
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
-    if timed_out {
+    if capture.timed_out {
         let notice = format!("命令超过 {} 秒未结束，已强制终止。", timeout.as_secs());
         combined = if combined.is_empty() {
             notice
@@ -294,7 +312,7 @@ pub fn execute_command(mut command: Command, timeout: Duration) -> Result<Operat
         };
     }
     Ok(OperationResult {
-        success: status.is_some_and(|status| status.success()),
+        success: capture.success,
         output: combined,
     })
 }

@@ -47,6 +47,10 @@ pub struct RuntimeState {
     // 禁用启动入口，后端 start_dsh/restart_dsh 也会拒绝手动启动（防呆：
     // 这些操作会先停服务再改写安装目录，中途启动会跑在半成品目录上）。
     pub busy: Option<String>,
+    // 收到过多少行子进程输出。启动守护用它判断 dsh 是否还在干活（升级后首次
+    // 启动要现装 profile 依赖，几分钟不监听端口但一直在刷日志），只要还有新
+    // 输出就不能当成卡死。
+    pub log_ticks: u64,
 }
 
 impl Default for RuntimeState {
@@ -61,6 +65,7 @@ impl Default for RuntimeState {
             logs: VecDeque::new(),
             generation: 0,
             busy: None,
+            log_ticks: 0,
         }
     }
 }
@@ -111,6 +116,7 @@ pub fn push_log(app: &AppHandle, state: &AppState, generation: u64, source: &str
             return;
         }
         runtime.logs.push_back(format!("[{source}] {line}"));
+        runtime.log_ticks = runtime.log_ticks.wrapping_add(1);
         while runtime.logs.len() > MAX_LOG_LINES {
             runtime.logs.pop_front();
         }

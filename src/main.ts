@@ -703,6 +703,9 @@ async function refreshPackageInfo(): Promise<void> {
     const info = await invoke<PackageInfo>("get_package_info");
     $("#current-version").textContent = info.current_version;
     $("#latest-version").textContent = info.latest_version;
+    // detail 里带着 dsh --version 的原始输出与版本解析的结果/失败原因；
+    // 查询失败时用户至少能悬停看到是网络问题还是包名写错了。
+    $("#latest-version").title = info.detail;
     $("#package-source").textContent = info.source;
   } catch (error) { $("#package-source").textContent = "检查失败"; toast(String(error), true); }
 }
