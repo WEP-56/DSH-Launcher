@@ -242,6 +242,11 @@ app.innerHTML = `
   </div>
 `;
 
+// 平台判断：macOS 上给 <body> 加 os-macos 类，仅用于切换原生红绿灯 + 工具栏右移布局。
+// 用 navigator.userAgent 判断（Tauri 桌面 webview 的 UA 在 macOS 含 "Mac"），零 Rust/权限改动，
+// 因此 Windows 永远不加该类、布局与作者原始版本完全一致。
+if (/Mac/i.test(navigator.userAgent)) document.body.classList.add("os-macos");
+
 createIcons({ icons: { CircleAlert, CircleCheck, Code2, Download, ExternalLink, Eye, FileCog, FileText, FolderOpen, Github, LoaderCircle, Minus, PackageCheck, Plus, Puzzle, RefreshCw, RotateCcw, Save, Search, Settings, SlidersHorizontal, Square, TerminalSquare, Trash2, Wrench, X } });
 const $ = <T extends HTMLElement = HTMLInputElement>(selector: string): T => document.querySelector<T>(selector)!;
 const currentWindow = getCurrentWindow();
@@ -424,17 +429,27 @@ function syncFrames(): void {
         frame.title = "DeepSeek Harness WebUI";
         frame.setAttribute("allow", "clipboard-read; clipboard-write");
         $("#workspace-view").appendChild(frame);
+        // 新 iframe 从空白装载 WebUI 的过程会产生白屏，先隐藏，
+        // 首次 load 完成后才揭晓（后续 src 重载复用同一监听）。
+        frame.hidden = true;
+        frame.addEventListener("load", () => {
+          if (tab.id === activeTab) frame.hidden = false;
+        });
         tab.frame = frame;
       }
       // 只在地址变化或被标记过期时装载。iframe.src 的 getter 会把地址规范化
       // （补上尾部斜杠），与 status.url 直接比较永远不相等，因此自己记录
       // loadedUrl，避免每条状态事件（包括日志推送）都触发一次 WebUI 重载。
       if (tab.loadedUrl !== status.url || tab.stale) {
+        // 重载期间先隐藏、load 后揭晓，避免空白闪烁。
+        tab.frame.hidden = true;
         tab.frame.src = status.url;
         tab.loadedUrl = status.url;
         tab.stale = false;
+      } else {
+        // 已加载完成的标签直接显示（切换回来不应闪屏）。
+        tab.frame.hidden = false;
       }
-      tab.frame.hidden = false;
     } else if (tab.frame) {
       tab.frame.hidden = true;
     }
@@ -570,7 +585,17 @@ function reorderDraggedTab(x: number): void {
     if (rect && x < rect.left + rect.width / 2) { insert = index; break; }
   }
   const next = [...others.slice(0, insert), dragged, ...others.slice(insert)];
-  if (next.some((tab, index) => tab !== tabs[index])) { tabs = next; renderTabs(); }
+  // 拖拽过程中只搬移 DOM 节点（O(n) appendChild，不重建、不重绑事件），避免每次
+  // 跨过中点就整条 innerHTML 重建导致的卡顿；最终顺序由 finishTabDrag 的 renderTabs 归一。
+  if (next.some((tab, index) => tab !== tabs[index])) {
+    tabs = next;
+    const strip = $("#tab-strip");
+    for (const tab of tabs) {
+      const el = tabElement(tab.id);
+      if (el) strip.appendChild(el);
+    }
+    tabElement(dragId)?.classList.add("dragging");
+  }
   updateTabDropIndicator(x);
 }
 
@@ -628,6 +653,11 @@ window.addEventListener("pointerup", (event) => finishTabDrag(event, false));
 window.addEventListener("pointercancel", (event) => finishTabDrag(event, true));
 
 function renderStatus(next: LauncherStatus): void {
+  // 去重守卫：launcher-status 事件高频可达（日志流/状态轮询），若关键字段未变则
+  // 跳过本次整轮 DOM 更新，避免冗余重绘导致的主线程抖动。busy 必须参与比较：
+  // OpsBusy 进入/退出维护态时只改这一个字段就广播，漏掉它会让“维护中”与
+  // 启动/停止/重启的禁用状态永远不刷新。
+  if (next.phase === status.phase && next.message === status.message && next.url === status.url && next.pid === status.pid && next.external === status.external && next.busy === status.busy) return;
   const wasReady = status.phase === "ready";
   status = next;
   const externalReady = next.phase === "ready" && next.external;
@@ -1086,7 +1116,12 @@ $("#tab-strip").addEventListener("wheel", (event) => {
 }, { passive: false });
 // 中键按下默认会进入自动滚动模式，抢在标签的中键关闭之前按掉。
 $("#tab-strip").addEventListener("mousedown", (event) => { if (event.button === 1) event.preventDefault(); });
-window.addEventListener("resize", updateTabDensity);
+let resizeRaf = 0;
+window.addEventListener("resize", () => {
+  // rAF 节流：窗口拖动缩放时 resize 高频触发，合并到下一帧只算一次，避免连续重排。
+  if (resizeRaf) return;
+  resizeRaf = window.requestAnimationFrame(() => { resizeRaf = 0; updateTabDensity(); });
+});
 $("#new-window").addEventListener("click", () => void invoke("new_launcher_window").catch((error) => toast(String(error), true)));
 $("#window-minimize").addEventListener("click", () => void currentWindow.minimize());
 $("#window-maximize").addEventListener("click", () => void currentWindow.toggleMaximize());

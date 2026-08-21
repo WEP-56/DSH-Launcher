@@ -4,9 +4,13 @@ use std::{
     thread,
     time::Duration,
 };
+#[cfg(target_os = "macos")]
+use tauri::TitleBarStyle;
 use tauri::{
     webview::DownloadEvent, AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
 };
+#[cfg(target_os = "macos")]
+use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
 
 use crate::{
     download::handle_download_request,
@@ -14,7 +18,10 @@ use crate::{
 };
 
 // 标题栏的逻辑高度（px），前端 .titlebar 与这里必须一致；拖拽落点命中
-// 其他窗口的这段区域时视为“拖入标签栏”。
+// 其他窗口的这段区域时视为“拖入标签栏”。macOS 用原生 Overlay 标题栏、
+// 前端 .titlebar 保持 35px（与 Windows/Linux 一致，Overlay 由红绿灯所在
+// 系统栏提供，前端无需加高），各平台统一为 35px，否则 43~48px 的拖放会
+// 误判为“拖出成新窗口”。
 const TITLEBAR_LOGICAL_HEIGHT: f64 = 35.0;
 const TAB_DRAG_PREVIEW_LABEL: &str = "tab-drag-preview";
 
@@ -59,8 +66,26 @@ pub fn spawn_launcher_window_named(
         .inner_size(width, height)
         .min_inner_size(620.0, 560.0)
         .resizable(true)
-        .decorations(false)
         .visible(false);
+    // macOS：启用原生装饰 + 叠加标题栏，露出标准红黄绿按钮（左侧）。
+    // transparent(true) 配合 macos-private-api，让标题栏下方的原生振动模糊
+    // （NSVisualEffectView）能够透出；前端把标题栏设为半透明以呈现毛玻璃。
+    // Windows/Linux：保持无边框自定义标题栏（与原始行为完全一致）。
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .decorations(true)
+            .title_bar_style(TitleBarStyle::Overlay)
+            .transparent(true)
+            // Overlay 模式下系统会在红绿灯右侧绘制原生标题文字；清空标题
+            // 只保留红绿灯，避免“DSH Launcher”文字与前端居中的标签区在
+            // 小窗口下交叠。窗口标题由 Dock/App 菜单提供，无需在此显示。
+            .title("");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder = builder.decorations(false);
+    }
     builder = match position {
         Some((x, y)) => builder.position(x, y),
         None => builder.center(),
@@ -85,6 +110,17 @@ pub fn spawn_launcher_window_named(
         })
         .build()
         .map_err(|error| format!("无法创建 Launcher 窗口：{error}"))?;
+    // macOS：安装原生振动模糊（HeaderView 材质），标题栏呈系统毛玻璃质感。
+    // 失败不影响功能，仅降级为纯色标题栏。
+    #[cfg(target_os = "macos")]
+    {
+        let _ = apply_vibrancy(
+            &window,
+            NSVisualEffectMaterial::HeaderView,
+            Some(NSVisualEffectState::Active),
+            None,
+        );
+    }
     reveal_window_fallback(window);
     Ok(())
 }
@@ -109,12 +145,16 @@ pub fn setup_tab_drag_preview(app: &tauri::App) -> tauri::Result<()> {
     .inner_size(190.0, 30.0)
     .resizable(false)
     .decorations(false)
-    .transparent(true)
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
-    .visible(false)
-    .build()?;
+    .visible(false);
+    // 预览窗不需要毛玻璃，只要背景透明。macOS 上 `.transparent(true)` 依赖
+    // macos-private-api，而主窗口已经用它做振动模糊；这里保持仅非 macOS 启用，
+    // macOS 下退化为不透明小窗，不影响拖拽落点判定。
+    #[cfg(not(target_os = "macos"))]
+    let preview = preview.transparent(true);
+    let preview = preview.build()?;
     preview.set_ignore_cursor_events(true)?;
     Ok(())
 }

@@ -16,6 +16,9 @@
   --danger: #c83d47;
   --success: #15835c;
   --warning: #be7412;
+  --code-bg: #f0f2f5;
+  --code-fg: #2a2e34;
+  --code-border: var(--border);
   letter-spacing: 0;
 }
 * { box-sizing: border-box; }
@@ -34,6 +37,17 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .tool-button span { display: none; }
 .window-controls button { width: 44px; }
 .window-controls button.close:hover { background: #d3313d; color: #fff; }
+
+/* —— macOS：原生红绿灯在左，工具移到右侧（仅 body.os-macos，不影响 Windows） —— */
+/* 原生红黄绿按钮出现在左上，给标题栏左侧留 ~80px 避免内容压到按钮上。 */
+body.os-macos .titlebar { padding-left: 80px; padding-right: 8px; }
+/* 把工具组（管理/配置/插件/设置/新建）移到标签页右侧。 */
+body.os-macos .toolbar-left { order: 2; }
+/* 仅保留刷新按钮（“窗口控制”里的 min/max/close 由原生红绿灯接管，故隐藏）。 */
+body.os-macos .window-controls { order: 3; }
+body.os-macos #window-minimize,
+body.os-macos #window-maximize,
+body.os-macos #window-close { display: none; }
 
 /* —— 标签条：居中放在顶栏，空白处仍是窗口拖拽区 —— */
 .tab-zone { position: relative; flex: 1 1 0; min-width: 0; height: 100%; display: flex; align-items: center; justify-content: center; gap: 3px; padding: 0 8px; overflow: hidden; }
@@ -58,19 +72,19 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .tab-strip.dense .tab-title { text-overflow: clip; }
 .tab.dragging { opacity: .22; }
 .tab.tearing { opacity: .3; }
-.tab-drop-indicator { position: absolute; top: 5px; bottom: 5px; left: 0; width: 2px; border-radius: 2px; background: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent), 0 0 8px color-mix(in srgb, var(--accent) 62%, transparent); pointer-events: none; z-index: 3; }
+.tab-drop-indicator { position: absolute; top: 5px; bottom: 5px; left: 0; width: 2px; border-radius: 2px; background: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent), 0 0 8px color-mix(in srgb, var(--accent) 62%, transparent); pointer-events: none; z-index: 3; will-change: transform; }
 .tab-drop-indicator[hidden] { display: none; }
 .tab-add { flex: none; width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); }
 .tab-add:hover { background: var(--surface-hover); color: var(--text); }
 .tab-add svg { width: 14px; height: 14px; stroke-width: 2; }
-.tab-ghost { position: fixed; left: 0; top: 0; z-index: 100; pointer-events: none; display: flex; align-items: center; gap: 7px; width: 168px; height: 28px; padding: 0 10px; border: 1px solid var(--accent); border-radius: 6px; background: var(--surface); color: var(--text); box-shadow: 0 10px 24px rgba(15, 19, 26, .32); }
+.tab-ghost { position: fixed; left: 0; top: 0; z-index: 100; pointer-events: none; display: flex; align-items: center; gap: 7px; width: 168px; height: 28px; padding: 0 10px; border: 1px solid var(--accent); border-radius: 6px; background: var(--surface); color: var(--text); box-shadow: 0 10px 24px rgba(15, 19, 26, .32); will-change: transform; }
 .tab-ghost strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
 .tab-ghost-icon { color: var(--accent); font-size: 12px; line-height: 1; }
 .tab-ghost.outside-window { visibility: hidden; }
 body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; }
 
-.workspace-view { position: relative; width: 100%; height: calc(100% - 35px); background: #fff; }
-.dsh-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+.workspace-view { position: relative; width: 100%; height: calc(100% - 35px); background: var(--surface); }
+.dsh-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--surface); color-scheme: light dark; }
 .dsh-frame[hidden] { display: none; }
 .workspace-state { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 28px; background: var(--surface-muted); text-align: center; }
 .workspace-state[hidden] { display: none; }
@@ -82,7 +96,7 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; }
 .whale-button:disabled { cursor: wait; opacity: 1; }
 .whale-button:disabled img { transform: none; }
 .whale-wave { position: absolute; inset: 3px; z-index: 1; border: 1px solid color-mix(in srgb, var(--accent) 48%, transparent); border-radius: 50%; opacity: 0; pointer-events: none; }
-.workspace-state[data-phase="starting"] .whale-wave { animation: whale-wave 2.1s ease-out infinite; }
+.workspace-state[data-phase="starting"] .whale-wave { animation: whale-wave 2.1s ease-out infinite; will-change: transform, opacity; }
 .workspace-state[data-phase="starting"] .whale-wave-two { animation-delay: 1.05s; }
 .workspace-state h2 { margin: 0; font-size: 17px; line-height: 24px; font-weight: 650; }
 .workspace-state p { max-width: 540px; margin: 8px 0 0; color: var(--text-muted); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
@@ -93,10 +107,10 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; }
 .modal { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; }
 .modal-backdrop { position: absolute; inset: 0; background: rgba(16, 18, 22, .38); }
 .modal-panel { position: relative; z-index: 1; width: min(680px, calc(100% - 34px)); max-height: calc(100% - 32px); overflow: auto; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); box-shadow: 0 18px 55px rgba(22, 28, 38, .22); }
-.manage-panel { width: min(650px, calc(100% - 34px)); }
-.settings-panel { width: min(560px, calc(100% - 34px)); }
-.config-panel { width: min(850px, calc(100% - 34px)); height: min(650px, calc(100% - 32px)); display: flex; flex-direction: column; }
-.plugin-panel { width: min(960px, calc(100% - 34px)); height: min(720px, calc(100% - 32px)); display: flex; flex-direction: column; }
+.manage-panel { width: min(560px, calc(100% - 34px)); }
+.settings-panel { width: min(540px, calc(100% - 34px)); }
+.config-panel { width: min(720px, calc(100% - 34px)); height: min(620px, calc(100% - 64px)); display: flex; flex-direction: column; }
+.plugin-panel { width: min(820px, calc(100% - 34px)); height: min(680px, calc(100% - 64px)); display: flex; flex-direction: column; }
 .modal-header { min-height: 58px; display: flex; align-items: center; justify-content: space-between; padding: 13px 18px; border-bottom: 1px solid var(--border); }
 .modal-header h2 { margin: 2px 0 0; font-size: 17px; line-height: 23px; font-weight: 650; }
 .eyebrow { margin: 0; color: var(--text-muted); font: 700 10px/13px "Cascadia Mono", Consolas, monospace; letter-spacing: .04em; }
@@ -138,12 +152,12 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 .segmented input { position: absolute; opacity: 0; pointer-events: none; }
 .segmented span { display: block; padding: 6px 12px; border-radius: 4px; color: var(--text-muted); font-size: 11px; text-align: center; }
 .segmented input:checked + span { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(20, 24, 31, .12); }
-.operation-output { max-height: 120px; margin: 0 18px 16px; padding: 9px 11px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; background: #191b1f; color: #d9dde3; font: 11px/1.5 "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.operation-output { max-height: 120px; margin: 0 18px 16px; padding: 9px 11px; overflow: auto; border: 1px solid var(--code-border); border-radius: 5px; background: var(--code-bg); color: var(--code-fg); font: 11px/1.5 "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .config-toolbar { display: flex; gap: 8px; padding: 14px 18px 7px; }
 .config-toolbar select { flex: 1; }
 .path-caption { margin: 0; padding: 0 18px 9px; color: var(--text-muted); font: 10px/14px "Cascadia Mono", Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.config-editor { flex: 1; min-height: 240px; margin: 0 18px; padding: 13px; resize: none; border: 1px solid var(--border); border-radius: 5px; background: #191b1f; color: #d9dde3; font: 12px/1.6 "Cascadia Mono", Consolas, monospace; tab-size: 2; }
+.config-editor { flex: 1; min-height: 240px; margin: 0 18px; padding: 13px; resize: none; border: 1px solid var(--code-border); border-radius: 5px; background: var(--code-bg); color: var(--code-fg); font: 12px/1.6 "Cascadia Mono", Consolas, monospace; tab-size: 2; }
 .modal-footer { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding: 14px 18px; }
 .modal-footer span { flex: 1; color: var(--text-muted); font-size: 11px; overflow-wrap: anywhere; }
 .settings-content { padding: 18px; }
@@ -224,7 +238,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 /* 插件操作进行中：屏蔽会触发第二个操作的入口，防止并发停启服务。 */
 .plugin-panel.busy .plugin-actions button, .plugin-panel.busy #install-plugin, .plugin-panel.busy .search-install, .plugin-panel.busy .market-install, .plugin-panel.busy #update-all-plugins, .plugin-panel.busy #check-plugin-updates { pointer-events: none; opacity: .5; }
 .loading, .empty-state { display: grid; place-items: center; gap: 7px; min-height: 130px; color: var(--text-muted); font-size: 12px; text-align: center; }
-.loading svg { width: 18px; height: 18px; animation: spin 1s linear infinite; }
+.loading svg { width: 18px; height: 18px; animation: spin 1s linear infinite; will-change: transform; }
 .empty-state svg { width: 22px; height: 22px; }
 .empty-state p { margin: 0; color: var(--text); }
 .empty-state small { font-size: 11px; }
@@ -244,7 +258,22 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
   .package-summary > div { padding: 8px 11px; }
 }
 @media (prefers-color-scheme: dark) {
-  :root { --surface: #202226; --surface-muted: #17191c; --surface-hover: #2a2d32; --border: #34373c; --border-strong: #4a4e55; --text: #f0f1f3; --text-muted: #a2a7af; }
+  :root { --surface: #202226; --surface-muted: #17191c; --surface-hover: #2a2d32; --border: #34373c; --border-strong: #4a4e55; --text: #f0f1f3; --text-muted: #a2a7af; --code-bg: #1a1c20; --code-fg: #d9dde3; --code-border: #2c2f34; }
   .titlebar { background: var(--surface); }
   .window-controls button.close:hover { background: #c73540; }
+}
+
+/* —— 流畅度优化：弹窗进入过渡（仅 opacity/transform，GPU 合成，不触发重排） —— */
+.modal:not([hidden]) .modal-backdrop { animation: modal-fade .15s ease both; }
+.modal:not([hidden]) .modal-panel { will-change: transform, opacity; animation: modal-rise .18s ease both; }
+@keyframes modal-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-rise { from { opacity: 0; transform: translateY(10px) scale(.992); } to { opacity: 1; transform: none; } }
+
+/* —— 流畅度优化：尊重系统“减少动态效果”，关闭持续动画，降低低性能设备负担 —— */
+@media (prefers-reduced-motion: reduce) {
+  .workspace-state[data-phase="starting"] .whale-wave,
+  .workspace-state[data-phase="starting"] .whale-wave-two,
+  .loading svg,
+  .modal:not([hidden]) .modal-panel,
+  .modal:not([hidden]) .modal-backdrop { animation: none !important; }
 }
