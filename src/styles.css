@@ -16,6 +16,9 @@
   --danger: #c83d47;
   --success: #15835c;
   --warning: #be7412;
+  --code-bg: #f0f2f5;
+  --code-fg: #2a2e34;
+  --code-border: var(--border);
   letter-spacing: 0;
 }
 * { box-sizing: border-box; }
@@ -104,10 +107,10 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; }
 .modal { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; }
 .modal-backdrop { position: absolute; inset: 0; background: rgba(16, 18, 22, .38); }
 .modal-panel { position: relative; z-index: 1; width: min(680px, calc(100% - 34px)); max-height: calc(100% - 32px); overflow: auto; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); box-shadow: 0 18px 55px rgba(22, 28, 38, .22); }
-.manage-panel { width: min(650px, calc(100% - 34px)); }
-.settings-panel { width: min(560px, calc(100% - 34px)); }
-.config-panel { width: min(850px, calc(100% - 34px)); height: min(650px, calc(100% - 32px)); display: flex; flex-direction: column; }
-.plugin-panel { width: min(960px, calc(100% - 34px)); height: min(720px, calc(100% - 32px)); display: flex; flex-direction: column; }
+.manage-panel { width: min(560px, calc(100% - 34px)); }
+.settings-panel { width: min(540px, calc(100% - 34px)); }
+.config-panel { width: min(720px, calc(100% - 34px)); height: min(620px, calc(100% - 64px)); display: flex; flex-direction: column; }
+.plugin-panel { width: min(820px, calc(100% - 34px)); height: min(680px, calc(100% - 64px)); display: flex; flex-direction: column; }
 .modal-header { min-height: 58px; display: flex; align-items: center; justify-content: space-between; padding: 13px 18px; border-bottom: 1px solid var(--border); }
 .modal-header h2 { margin: 2px 0 0; font-size: 17px; line-height: 23px; font-weight: 650; }
 .eyebrow { margin: 0; color: var(--text-muted); font: 700 10px/13px "Cascadia Mono", Consolas, monospace; letter-spacing: .04em; }
@@ -149,12 +152,12 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 .segmented input { position: absolute; opacity: 0; pointer-events: none; }
 .segmented span { display: block; padding: 6px 12px; border-radius: 4px; color: var(--text-muted); font-size: 11px; text-align: center; }
 .segmented input:checked + span { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(20, 24, 31, .12); }
-.operation-output { max-height: 120px; margin: 0 18px 16px; padding: 9px 11px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; background: #191b1f; color: #d9dde3; font: 11px/1.5 "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.operation-output { max-height: 120px; margin: 0 18px 16px; padding: 9px 11px; overflow: auto; border: 1px solid var(--code-border); border-radius: 5px; background: var(--code-bg); color: var(--code-fg); font: 11px/1.5 "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .config-toolbar { display: flex; gap: 8px; padding: 14px 18px 7px; }
 .config-toolbar select { flex: 1; }
 .path-caption { margin: 0; padding: 0 18px 9px; color: var(--text-muted); font: 10px/14px "Cascadia Mono", Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.config-editor { flex: 1; min-height: 240px; margin: 0 18px; padding: 13px; resize: none; border: 1px solid var(--border); border-radius: 5px; background: #191b1f; color: #d9dde3; font: 12px/1.6 "Cascadia Mono", Consolas, monospace; tab-size: 2; }
+.config-editor { flex: 1; min-height: 240px; margin: 0 18px; padding: 13px; resize: none; border: 1px solid var(--code-border); border-radius: 5px; background: var(--code-bg); color: var(--code-fg); font: 12px/1.6 "Cascadia Mono", Consolas, monospace; tab-size: 2; }
 .modal-footer { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding: 14px 18px; }
 .modal-footer span { flex: 1; color: var(--text-muted); font-size: 11px; overflow-wrap: anywhere; }
 .settings-content { padding: 18px; }
@@ -246,7 +249,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
   .package-summary > div { padding: 8px 11px; }
 }
 @media (prefers-color-scheme: dark) {
-  :root { --surface: #202226; --surface-muted: #17191c; --surface-hover: #2a2d32; --border: #34373c; --border-strong: #4a4e55; --text: #f0f1f3; --text-muted: #a2a7af; }
+  :root { --surface: #202226; --surface-muted: #17191c; --surface-hover: #2a2d32; --border: #34373c; --border-strong: #4a4e55; --text: #f0f1f3; --text-muted: #a2a7af; --code-bg: #1a1c20; --code-fg: #d9dde3; --code-border: #2c2f34; }
   .titlebar { background: var(--surface); }
   .window-controls button.close:hover { background: #c73540; }
 }
