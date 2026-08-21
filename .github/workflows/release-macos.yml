@@ -55,14 +55,11 @@ jobs:
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 可选：在仓库 Secrets 中配置以下变量后自动签名并公证。
-          # 留空时产出未签名的 .app/.dmg（本地可用，但首次打开会被 Gatekeeper 拦截）。
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # 这里刻意不传 APPLE_CERTIFICATE / APPLE_SIGNING_IDENTITY / APPLE_ID 那一套：
+          # 仓库没配这些 Secret 时 ${{ secrets.X }} 展开成空串，但环境变量仍然“存在”，
+          # tauri 的 bundler 只判断变量存不存在，于是拿空证书去 security import，
+          # 直接死在 “failed to import keychain certificate”。
+          # 要签名/公证就把这几个变量连同 Secret 一起加回来，别留空。
         with:
           tauriScript: npm run tauri
           # 产出同时支持 Apple Silicon 与 Intel 的通用二进制。
