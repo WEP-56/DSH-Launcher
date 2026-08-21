@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - 'v*'
+  # 手动补跑：macOS 构建失败时不必为了重试再发一个版本号，
+  # 直接对着已存在的 tag 跑一次，产物会挂到该 tag 对应的 Release 上。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建并上传的 tag（例如 v0.7.2）'
+        required: true
 
 permissions:
   contents: write
@@ -16,6 +23,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 手动补跑时检出 tag 对应的源码，而不是默认分支。
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -26,8 +36,10 @@ jobs:
       - name: Install Rust stable (universal target)
         uses: dtolnay/rust-toolchain@stable
         with:
-          # 同时拉取 x86_64 与 aarch64 标准库，便于产出通用二进制。
-          targets: universal-apple-darwin
+          # universal-apple-darwin 不是 rustup 的目标，装它会直接失败
+          # （component 'rust-std' for target 'universal-apple-darwin' is unavailable）。
+          # tauri 是把下面两个真实目标的产物 lipo 成通用二进制，所以装这两个。
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Cache Rust build artifacts
         uses: swatinem/rust-cache@v2
@@ -53,10 +65,10 @@ jobs:
           tauriScript: npm run tauri
           # 产出同时支持 Apple Silicon 与 Intel 的通用二进制。
           args: --target universal-apple-darwin
-          tagName: ${{ github.ref_name }}
-          releaseName: DSH Launcher ${{ github.ref_name }}
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: DSH Launcher ${{ inputs.tag || github.ref_name }}
           releaseBody: |
-            DSH Launcher macOS release (universal) for ${{ github.ref_name }}.
+            DSH Launcher macOS release (universal) for ${{ inputs.tag || github.ref_name }}.
 
             Download the .dmg below — it runs on both Apple Silicon and Intel Macs.
             If Gatekeeper blocks it, right-click the app and choose Open, or run
