@@ -577,7 +577,17 @@ function reorderDraggedTab(x: number): void {
     if (rect && x < rect.left + rect.width / 2) { insert = index; break; }
   }
   const next = [...others.slice(0, insert), dragged, ...others.slice(insert)];
-  if (next.some((tab, index) => tab !== tabs[index])) { tabs = next; renderTabs(); }
+  // 拖拽过程中只搬移 DOM 节点（O(n) appendChild，不重建、不重绑事件），避免每次
+  // 跨过中点就整条 innerHTML 重建导致的卡顿；最终顺序由 finishTabDrag 的 renderTabs 归一。
+  if (next.some((tab, index) => tab !== tabs[index])) {
+    tabs = next;
+    const strip = $("#tab-strip");
+    for (const tab of tabs) {
+      const el = tabElement(tab.id);
+      if (el) strip.appendChild(el);
+    }
+    tabElement(dragId)?.classList.add("dragging");
+  }
   updateTabDropIndicator(x);
 }
 
@@ -635,6 +645,9 @@ window.addEventListener("pointerup", (event) => finishTabDrag(event, false));
 window.addEventListener("pointercancel", (event) => finishTabDrag(event, true));
 
 function renderStatus(next: LauncherStatus): void {
+  // 去重守卫：launcher-status 事件高频可达（日志流/状态轮询），若关键字段未变则
+  // 跳过本次整轮 DOM 更新，避免冗余重绘导致的主线程抖动。
+  if (next.phase === status.phase && next.message === status.message && next.url === status.url && next.pid === status.pid && next.external === status.external) return;
   const wasReady = status.phase === "ready";
   status = next;
   const externalReady = next.phase === "ready" && next.external;
@@ -1003,7 +1016,12 @@ $("#tab-strip").addEventListener("wheel", (event) => {
 }, { passive: false });
 // 中键按下默认会进入自动滚动模式，抢在标签的中键关闭之前按掉。
 $("#tab-strip").addEventListener("mousedown", (event) => { if (event.button === 1) event.preventDefault(); });
-window.addEventListener("resize", updateTabDensity);
+let resizeRaf = 0;
+window.addEventListener("resize", () => {
+  // rAF 节流：窗口拖动缩放时 resize 高频触发，合并到下一帧只算一次，避免连续重排。
+  if (resizeRaf) return;
+  resizeRaf = window.requestAnimationFrame(() => { resizeRaf = 0; updateTabDensity(); });
+});
 $("#new-window").addEventListener("click", () => void invoke("new_launcher_window").catch((error) => toast(String(error), true)));
 $("#window-minimize").addEventListener("click", () => void currentWindow.minimize());
 $("#window-maximize").addEventListener("click", () => void currentWindow.toggleMaximize());
