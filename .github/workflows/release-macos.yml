@@ -12,6 +12,8 @@ on:
         description: '要构建并上传的 tag（例如 v0.7.2）'
         required: true
 
+# 同 release.yml：仓库 Workflow permissions 必须是 “Read and write permissions”，
+# 只写这里的 contents: write 会被仓库的只读设置压回去。
 permissions:
   contents: write
 

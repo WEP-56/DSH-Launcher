@@ -4,7 +4,18 @@ on:
   push:
     tags:
       - 'v*'
+  # 手动补跑：构建失败时不必为了重试而删标签或改版本号，
+  # 直接对着已存在的 tag 跑一次，产物会挂到该 tag 对应的 Release 上。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建并上传的 tag（例如 v0.7.2）'
+        required: true
 
+# 注意：这里声明 contents: write 还不够，仓库
+# Settings → Actions → General → Workflow permissions 必须是
+# “Read and write permissions”，否则 GITHUB_TOKEN 会被仓库设置压回只读，
+# 构建能成功但创建 Release 时报 “Resource not accessible by integration”。
 permissions:
   contents: write
 
@@ -16,6 +27,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 手动补跑时检出 tag 对应的源码，而不是默认分支。
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -40,10 +54,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tauriScript: npm run tauri
-          tagName: ${{ github.ref_name }}
-          releaseName: DSH Launcher ${{ github.ref_name }}
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: DSH Launcher ${{ inputs.tag || github.ref_name }}
           releaseBody: |
-            DSH Launcher Windows release for ${{ github.ref_name }}.
+            DSH Launcher Windows release for ${{ inputs.tag || github.ref_name }}.
 
             Download the Windows installer from the assets below.
           releaseDraft: false
