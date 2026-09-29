@@ -1,3 +1,7 @@
+## 由于DeepSeek官方推出了桌面版DSH，本仓库归档
+
+
+
 <p align="center">
   <img src="assets/dsh-icon-source.png" alt="DSH Launcher 图标" width="180">
 </p>
